@@ -314,5 +314,59 @@ cancelled task to TickTick as completed."
       (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
       (should (equal (cdr (assoc "status" (ticktick--heading-to-task))) 0))))))
 
+;;; Checklists
+
+(ert-deftest ticktick-test-checklist-items-become-checkboxes ()
+  "A CHECKLIST task's items reach Org as a checkbox list, in order."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      (should (equal (org-entry-get nil "TICKTICK_KIND") "CHECKLIST"))
+      (let ((body (buffer-substring-no-properties
+                   (point) (org-entry-end-position))))
+        ;; sortOrder, not the order the API happened to return them in
+        (should (string-match-p "- \\[ \\] Check 1\n- \\[ \\] Check 2\n- \\[X\\] Check completed"
+                                body)))))))
+
+(ert-deftest ticktick-test-checkboxes-are-not-sent-as-the-description ()
+  "The checkbox list renders the items; it is not the task's content.
+Sending it back as the description would duplicate every item as text."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should-not (string-match-p "Check 1" content))
+        (should-not (string-match-p "\\[X\\]" content)))))))
+
+(ert-deftest ticktick-test-plain-tasks-keep-checkbox-prose ()
+  "Only a checklist's own list is stripped, not checkboxes a user wrote."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** TODO plain\n:PROPERTIES:\n:TICKTICK_ID: plain-1\n:END:\n"
+             "notes\n- [ ] my own checkbox\n"))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org "plain-1"))
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should (string-match-p "my own checkbox" content)))))))
+
+(ert-deftest ticktick-test-task-without-items-gets-no-kind-property ()
+  "Ordinary tasks stay free of checklist bookkeeping."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
+      (should-not (org-entry-get nil "TICKTICK_KIND"))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

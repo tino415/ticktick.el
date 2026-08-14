@@ -199,6 +199,27 @@ Org priorities are mapped to TickTick priorities.
 - `DONE` - Completed task
 - `CANCELLED` - Marked "won't do" in TickTick
 
+### Checklists
+
+A TickTick checklist arrives as an org checkbox list under the task, ordered
+as TickTick orders it:
+
+```org
+** TODO Shopping
+:PROPERTIES:
+:TICKTICK_ID: abc123
+:TICKTICK_KIND: CHECKLIST
+:END:
+- [ ] bread
+- [X] milk
+```
+
+This is currently one-way: the items are shown, but ticking a box in Org
+does not tick it in TickTick. The list is not sent back as the task's
+description, and the items held by TickTick are left untouched, so nothing
+is lost by syncing a checklist — its items simply follow whatever TickTick
+says. Editing the rest of the task works as normal.
+
 ### Tags
 
 Tags are synchronized between TickTick and Org mode using Org's native tag syntax:

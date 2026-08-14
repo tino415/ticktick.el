@@ -897,6 +897,41 @@ DATA is the optional request body data."
 
 ;;; Org conversion helpers -----------------------------------------------------
 
+(defconst ticktick--checkbox-line-re "^[ \t]*- \\[[ Xx-]\\] "
+  "Regexp matching one line of a checklist rendered as org checkboxes.")
+
+(defun ticktick--strip-checkboxes-if-checklist (kind body)
+  "Return BODY without its checkbox lines when KIND is \"CHECKLIST\".
+The checkbox list is a rendering of the task's items, not part of its
+description, and sending it as the description would leave the text
+duplicated in TickTick.  Items themselves are left untouched: the update
+endpoint merges, so omitting them preserves what the server holds."
+  (if (not (equal kind "CHECKLIST"))
+      body
+    (string-trim
+     (mapconcat #'identity
+                (cl-remove-if (lambda (line)
+                                (string-match-p ticktick--checkbox-line-re line))
+                              (split-string body "\n"))
+                "\n"))))
+
+(defun ticktick--items-to-checkboxes (items)
+  "Render checklist ITEMS as an org checkbox list, or nil if there are none.
+ITEMS arrive in an arbitrary order, so they are sorted by `sortOrder' to
+match how TickTick shows them.  An item counts as done when its status is
+anything other than 0, the same convention tasks use."
+  (when (and items (> (length items) 0))
+    (let ((sorted (sort (copy-sequence items)
+                        (lambda (a b)
+                          (< (or (plist-get a :sortOrder) 0)
+                             (or (plist-get b :sortOrder) 0))))))
+      (mapconcat
+       (lambda (item)
+         (format "- [%s] %s"
+                 (if (eql (plist-get item :status) 0) " " "X")
+                 (or (plist-get item :title) "")))
+       sorted "\n"))))
+
 (defun ticktick--task-to-heading (task)
   "Convert TASK plist to an org heading string.
 Content lines starting with \"*\" or \"#+\" are escaped so they are not
@@ -908,7 +943,9 @@ read back as Org syntax."
         (due (plist-get task :dueDate))
         (etag (plist-get task :etag))
         (content (plist-get task :content))
-        (tags (plist-get task :tags)))
+        (tags (plist-get task :tags))
+        (kind (plist-get task :kind))
+        (items (plist-get task :items)))
     (string-join
      (delq nil
            (list
@@ -927,13 +964,18 @@ read back as Org syntax."
             ":PROPERTIES:"
             (format ":TICKTICK_ID: %s" id)
             (format ":TICKTICK_ETAG: %s" (or etag ""))
+            ;; Recorded so that reading the heading back knows a checkbox
+            ;; list is the task's items rather than part of its description.
+            (when (and kind (not (equal kind "TEXT")))
+              (format ":TICKTICK_KIND: %s" kind))
             ":END:"
             ;; An empty body must drop out entirely: keeping it would make
             ;; `string-join' end the heading with a newline for some tasks
             ;; and not others, which callers then cannot append to safely.
             (let ((body (and content (string-trim content))))
               (unless (or (null body) (string-empty-p body))
-                (org-escape-code-in-string body)))))
+                (org-escape-code-in-string body)))
+            (ticktick--items-to-checkboxes items)))
      "\n")))
 
 (defun ticktick--heading-to-task ()
@@ -950,6 +992,7 @@ Org escaping is removed from the content."
          (deadline (org-element-property :deadline el))
          (tags (org-element-property :tags el))
          (id (org-entry-get nil "TICKTICK_ID"))
+         (kind (org-entry-get nil "TICKTICK_KIND"))
          (content
           (save-excursion
             (save-restriction
@@ -961,9 +1004,11 @@ Org escaping is removed from the content."
               (when (looking-at ":PROPERTIES:")
                 (re-search-forward "^:END:" nil t)
                 (forward-line))
-              (org-unescape-code-in-string
-               (string-trim
-                (buffer-substring-no-properties (point) (point-max))))))))
+              (ticktick--strip-checkboxes-if-checklist
+               kind
+               (org-unescape-code-in-string
+                (string-trim
+                 (buffer-substring-no-properties (point) (point-max)))))))))
     `(("id" . ,id)
       ("title" . ,title)
       ("status" . ,(cond

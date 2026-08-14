@@ -1,0 +1,41 @@
+name: tests
+
+on: [push, pull_request]
+
+env:
+  WIREMOCK_VERSION: 3.13.2
+
+jobs:
+  ert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Emacs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emacs-nox
+          emacs --version
+
+      - name: Install package dependencies
+        run: |
+          emacs -Q --batch --eval "(progn \
+            (require 'package) \
+            (add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\") t) \
+            (package-initialize) \
+            (package-refresh-contents) \
+            (package-install 'request) \
+            (package-install 'simple-httpd))"
+
+      - name: Fetch WireMock
+        run: |
+          curl -fsSL -o wiremock-standalone.jar \
+            "https://repo1.maven.org/maven2/org/wiremock/wiremock-standalone/${WIREMOCK_VERSION}/wiremock-standalone-${WIREMOCK_VERSION}.jar"
+
+      - name: Run tests
+        env:
+          WIREMOCK_CMD: java -jar wiremock-standalone.jar
+        run: make test
+
+      - name: Byte-compile and checkdoc
+        run: make lint

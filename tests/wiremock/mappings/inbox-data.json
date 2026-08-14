@@ -1,0 +1,1 @@
+{"request":{"method":"GET","url":"/open/v1/project/inbox/data"},"response":{"status":200,"bodyFileName":"inbox-data.json","headers":{"Content-Type":"application/json"}}}

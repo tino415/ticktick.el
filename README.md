@@ -188,3 +188,29 @@ Task description here.
 ```
 
 Tags from TickTick are automatically converted to Org tags, and any tags you add to tasks in Org will be synced back to TickTick.
+
+## Development
+
+### Tests
+
+The test suite replays real API responses, recorded from a dedicated TickTick
+project, through a local [WireMock](https://wiremock.org) instance. Nothing
+talks to the live service, so the tests need no account and no credentials.
+
+```bash
+make test      # ERT suite against the recorded responses
+make lint      # byte-compile (must be warning-free) and checkdoc
+make           # both
+```
+
+`make test` needs `wiremock` on `PATH`, or `WIREMOCK_CMD` pointing at one:
+
+```bash
+WIREMOCK_CMD='java -jar wiremock-standalone.jar' make test
+```
+
+The fixtures live in `tests/wiremock/` and are committed. To re-record them
+against a real account — after adding a case to the source project, or when
+the API changes — see the instructions at the top of `tests/record.el`. Only
+the target project is written out, so an account's other projects never reach
+the repository.

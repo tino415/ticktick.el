@@ -4,13 +4,13 @@
     "url": "/open/v1/task/filter",
     "bodyPatterns": [
       {
-        "equalToJson": "{\"projectIds\":[\"6a7f04002eaa111364cd1f51\"]}"
+        "equalToJson": "{\"projectIds\":[\"inbox\"]}"
       }
     ]
   },
   "response": {
     "status": 200,
-    "bodyFileName": "filter-nostatus.json",
+    "bodyFileName": "filter-inbox.json",
     "headers": {
       "Content-Type": "application/json"
     }

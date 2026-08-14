@@ -130,7 +130,21 @@ Task description content here.
 
 ;; Port for OAuth callback server (default: 8080)
 (setq ticktick-httpd-port 8080)
+
+;; Pull tasks that are already completed into the org file (default: nil)
+(setq ticktick-import-completed-tasks t)
 ```
+
+### Completed Tasks
+
+Completing a task in TickTick marks it `DONE` in Org on the next sync.
+
+Tasks that were already completed before Org ever saw them are left out by
+default, so syncing a long-running project does not pull in its whole
+history. Set `ticktick-import-completed-tasks` to `t` if you want them.
+
+Tasks marked "won't do" in TickTick are not written to the org file yet, as
+Org has no keyword to map them onto.
 
 ### Automatic Syncing
 

@@ -194,5 +194,81 @@ run into the next one when it has a body to run on from."
           (should (equal (org-entry-get nil "TICKTICK_ID") id))
           (should (org-entry-get nil "SYNC_CACHE"))))))))
 
+;;; The project snapshot
+
+(ert-deftest ticktick-test-snapshot-covers-every-task-state ()
+  "The snapshot must see states the project listing leaves out.
+The listing returns the 5 open tasks; the other 4 come from the filter
+endpoint."
+  (ticktick-test--with-env
+   (let* ((tasks (ticktick--project-task-list ticktick-test-project-id))
+          (ids (mapcar (lambda (tk) (plist-get tk :id)) tasks)))
+     (should (= (length ids) (length (delete-dups (copy-sequence ids)))))
+     (dolist (id (list ticktick-test-active ticktick-test-completed
+                       ticktick-test-wont-do ticktick-test-sub-done))
+       (should (member id ids))))))
+
+(ert-deftest ticktick-test-snapshot-keeps-open-tasks-when-filter-is-empty ()
+  "Open tasks come from the listing, so a truncated filter cannot lose them.
+A busy project can exceed the filter endpoint's 200-task limit."
+  (ticktick-test--with-env
+   (cl-letf* ((real (symbol-function 'ticktick-request))
+              ((symbol-function 'ticktick-request)
+               (lambda (method endpoint &optional data)
+                 (if (equal endpoint "/open/v1/task/filter")
+                     nil                ; pretend the cap hid everything
+                   (funcall real method endpoint data)))))
+     (let ((ids (mapcar (lambda (tk) (plist-get tk :id))
+                        (ticktick--project-task-list ticktick-test-project-id))))
+       (should (member ticktick-test-active ids))
+       (should (member ticktick-test-note ids))
+       (should-not (member ticktick-test-completed ids))))))
+
+;;; What reaches the org file
+
+(ert-deftest ticktick-test-completed-tasks-are-not-imported-by-default ()
+  "Finished tasks Org has never seen stay out of the file."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-import-completed-tasks nil))
+     (ticktick-fetch-to-org))
+   (let ((org (ticktick-test--org-contents)))
+     (should (string-match-p (regexp-quote ticktick-test-active) org))
+     (should-not (string-match-p (regexp-quote ticktick-test-completed) org))
+     (should-not (string-match-p (regexp-quote ticktick-test-wont-do) org)))))
+
+(ert-deftest ticktick-test-completed-tasks-are-imported-when-asked ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-import-completed-tasks t))
+     (ticktick-fetch-to-org))
+   (let ((org (ticktick-test--org-contents)))
+     (should (string-match-p (regexp-quote ticktick-test-completed) org))
+     (should (string-match-p "^\\*\\* DONE " org))
+     ;; "won't do" still has no keyword to map onto, so it stays out
+     (should-not (string-match-p (regexp-quote ticktick-test-wont-do) org)))))
+
+(ert-deftest ticktick-test-tracked-task-is-updated-when-completed ()
+  "A task already in the file follows the server even when import is off."
+  (ticktick-test--with-env
+   (ticktick-test--org-file (list ticktick-test-completed))
+   (let ((ticktick-import-completed-tasks nil))
+     (ticktick-fetch-to-org))
+   (let ((org (ticktick-test--org-contents)))
+     (should (string-match-p (regexp-quote ticktick-test-completed) org))
+     (should (string-match-p "^\\*\\* DONE " org)))))
+
+(ert-deftest ticktick-test-wont-do-task-is-never-written-as-todo ()
+  "Rendering status -1 as TODO would read as reopening it."
+  (ticktick-test--with-env
+   (ticktick-test--org-file (list ticktick-test-wont-do))
+   (let ((ticktick-import-completed-tasks t))
+     (ticktick-fetch-to-org))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-wont-do))
+      ;; left exactly as the fixture wrote it, not rewritten from the server
+      (should (equal (org-entry-get nil "TICKTICK_ETAG") "stale"))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

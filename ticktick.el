@@ -219,6 +219,11 @@ This setting is overridden when `ticktick-delete-behavior' is set to `delete'."
                  (const :tag "Ask user" ask))
   :group 'ticktick)
 
+(defvar ticktick--api-base-url "https://api.ticktick.com"
+  "Base URL of the TickTick API.
+Only meant to be rebound by tests, so that they can be pointed at a
+local stub server instead of the live service.")
+
 (defvar ticktick-token nil
   "Access token plist for accessing the TickTick API.")
 
@@ -370,6 +375,80 @@ Returns a list of deleted task IDs."
     ;; the newly fetched IDs with the previous sync
     (when previous-ids
       (cl-set-difference previous-ids current-ids :test #'string=))))
+
+(defun ticktick--task-on-server (project-id task-id &optional retried)
+  "Ask TickTick whether TASK-ID still exists in PROJECT-ID.
+Return the task plist when the server still has the task, the symbol
+`missing' when the server confirms it is gone, or nil when the question
+could not be answered at all.  Callers must treat nil as \"unknown\"
+rather than \"deleted\".  RETRIED is set internally when re-trying once
+after refreshing an expired token."
+  (ticktick-ensure-token)
+  (let ((url (format "%s/open/v1/project/%s/task/%s"
+                     ticktick--api-base-url project-id task-id))
+        (result nil)
+        (unauthorized nil))
+    (request url
+      :type "GET"
+      :headers `(("Authorization" . ,(concat "Bearer "
+                                             (plist-get ticktick-token :access_token)))
+                 ("Content-Type" . "application/json"))
+      :parser #'ticktick--parse-json-maybe
+      :sync t
+      :complete
+      (cl-function
+       (lambda (&key response &allow-other-keys)
+         (let ((status (request-response-status-code response))
+               (data (request-response-data response)))
+           (cond
+            ((null status) nil)
+            ((= status 401) (setq unauthorized t))
+            ((= status 404) (setq result 'missing))
+            ((and (>= status 200) (< status 300))
+             ;; A task that no longer exists answers 200 with an empty
+             ;; body rather than 404, so an empty payload is the signal
+             ;; that it is really gone.
+             (setq result
+                   (if (and (consp data) (ignore-errors (plist-get data :id)))
+                       data
+                     'missing)))
+            (t nil))))))
+    (if (and unauthorized (not retried))
+        (progn (ticktick-refresh-token)
+               (ticktick--task-on-server project-id task-id t))
+      result)))
+
+(defun ticktick--project-id-for-task (task-id)
+  "Return the project id recorded for TASK-ID, or nil if unknown.
+Prefers the cached task-project map and falls back to the org file, so
+that the lookup also works for users who only ever fetch."
+  (or (ticktick--get-cached-project-id task-id)
+      (plist-get (ticktick--get-task-info task-id) :project-id)))
+
+(defun ticktick--verify-api-deletions (candidate-ids)
+  "Confirm with the server which of CANDIDATE-IDS were really deleted.
+A task drops out of the project listing both when it is deleted and
+when it is merely completed, so absence alone is not evidence.  Each
+candidate is checked with a direct request.  Return a plist with
+`:deleted', the ids the server confirmed are gone, and `:alive', an
+alist of (ID . TASK) for those that still exist.  Candidates that could
+not be checked are reported and left out of both lists."
+  (let ((deleted nil)
+        (alive nil)
+        (unknown 0))
+    (dolist (task-id candidate-ids)
+      (let ((project-id (ticktick--project-id-for-task task-id)))
+        (if (null project-id)
+            (setq unknown (1+ unknown))
+          (let ((res (ticktick--task-on-server project-id task-id)))
+            (cond
+             ((eq res 'missing) (push task-id deleted))
+             ((null res) (setq unknown (1+ unknown)))
+             (t (push (cons task-id res) alive)))))))
+    (when (> unknown 0)
+      (message "TickTick: %d task(s) could not be checked; not treating as deleted"
+               unknown))
+    (list :deleted (nreverse deleted) :alive (nreverse alive))))
 
 (defun ticktick--find-task-by-id-in-org (task-id)
   "Find and return the position of task with TASK-ID in org file.
@@ -731,7 +810,7 @@ METHOD is the HTTP method to use (GET, POST, etc.).
 ENDPOINT is the API endpoint to request.
 DATA is the optional request body data."
   (ticktick-ensure-token)
-  (let* ((url (concat "https://api.ticktick.com" endpoint))
+  (let* ((url (concat ticktick--api-base-url endpoint))
          (access-token (plist-get ticktick-token :access_token))
          (headers `(("Authorization" . ,(concat "Bearer " access-token))
                     ("Content-Type" . "application/json")))
@@ -892,6 +971,28 @@ Return the buffer position at the start of the heading."
         (insert (ticktick--task-to-heading task) "\n")
         (ticktick--update-sync-meta)))))
 
+(defun ticktick--refresh-org-task (task-id task)
+  "Rewrite the org heading for TASK-ID from the server's TASK plist.
+Used for tasks that disappeared from a project listing because they
+were completed rather than deleted, so that their new status still
+reaches the org file."
+  (let ((pos (ticktick--find-task-by-id-in-org task-id)))
+    (when pos
+      (with-current-buffer (find-file-noselect ticktick-sync-file)
+        (org-with-wide-buffer
+         (goto-char pos)
+         (let ((existing-etag (org-entry-get nil "TICKTICK_ETAG"))
+               (etag (plist-get task :etag)))
+           (unless (equal existing-etag etag)
+             (delete-region (org-entry-beginning-position)
+                            (org-entry-end-position))
+             (insert (ticktick--task-to-heading task) "\n")
+             ;; Inserting leaves point on the *next* heading, so step back
+             ;; before stamping the sync metadata.
+             (goto-char pos)
+             (ticktick--update-sync-meta))))
+        (save-buffer)))))
+
 (defun ticktick--sync-project (project)
   "Sync a single PROJECT with all its tasks."
   (let* ((project-id (plist-get project :id))
@@ -955,11 +1056,20 @@ Also detects and handles tasks deleted from TickTick since last sync."
     (let ((current-api-ids (ticktick--collect-api-task-ids all-projects))
           (previous-api-ids (plist-get ticktick--sync-state :api-task-ids)))
 
-      ;; Detect deletions from API (tasks that existed before but are gone now)
+      ;; Tasks missing from the listing are only *candidates* for deletion:
+      ;; completing a task also removes it from the listing.  Ask the server
+      ;; about each one before touching the org file.
       (when previous-api-ids
-        (let ((deleted-ids (cl-set-difference previous-api-ids current-api-ids :test #'string=)))
-          (when deleted-ids
-            (ticktick--handle-api-deletions deleted-ids))))
+        (let ((candidates (cl-set-difference previous-api-ids current-api-ids
+                                             :test #'string=)))
+          (when candidates
+            (let ((checked (ticktick--verify-api-deletions candidates)))
+              (dolist (entry (plist-get checked :alive))
+                (ticktick--refresh-org-task (car entry) (cdr entry))
+                ;; Keep tasks that still exist in the snapshot, otherwise
+                ;; every later sync would flag them as deleted again.
+                (push (car entry) current-api-ids))
+              (ticktick--handle-api-deletions (plist-get checked :deleted))))))
 
       ;; Sync all projects and tasks
       (with-current-buffer (find-file-noselect ticktick-sync-file)

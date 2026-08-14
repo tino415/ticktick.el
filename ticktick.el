@@ -887,7 +887,9 @@ DATA is the optional request body data."
 ;;; Org conversion helpers -----------------------------------------------------
 
 (defun ticktick--task-to-heading (task)
-  "Convert TASK plist to an org heading string."
+  "Convert TASK plist to an org heading string.
+Content lines starting with \"*\" or \"#+\" are escaped so they are not
+read back as Org syntax."
   (let ((id (plist-get task :id))
         (title (plist-get task :title))
         (status (plist-get task :status))
@@ -916,11 +918,13 @@ DATA is the optional request body data."
             ;; `string-join' end the heading with a newline for some tasks
             ;; and not others, which callers then cannot append to safely.
             (let ((body (and content (string-trim content))))
-              (unless (or (null body) (string-empty-p body)) body))))
+              (unless (or (null body) (string-empty-p body))
+                (org-escape-code-in-string body)))))
      "\n")))
 
 (defun ticktick--heading-to-task ()
-  "Convert org heading at point to a TickTick task plist."
+  "Convert org heading at point to a TickTick task plist.
+Org escaping is removed from the content."
   (let* ((el (org-element-at-point))
          (title (org-element-property :title el))
          (todo (org-element-property :todo-type el))
@@ -939,7 +943,9 @@ DATA is the optional request body data."
               (when (looking-at ":PROPERTIES:")
                 (re-search-forward "^:END:" nil t)
                 (forward-line))
-              (string-trim (buffer-substring-no-properties (point) (point-max)))))))
+              (org-unescape-code-in-string
+               (string-trim
+                (buffer-substring-no-properties (point) (point-max))))))))
     `(("id" . ,id)
       ("title" . ,title)
       ("status" . ,(if (eq todo 'done) 2 0))

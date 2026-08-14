@@ -127,6 +127,9 @@ Task description content here.
 
 ;; Pull tasks that are already completed into the org file (default: nil)
 (setq ticktick-import-completed-tasks t)
+
+;; Org keyword for tasks marked "won't do" (default: "CANCELLED")
+(setq ticktick-wont-do-keyword "CANCELLED")
 ```
 
 ### Completed Tasks
@@ -137,8 +140,12 @@ Tasks that were already completed before Org ever saw them are left out by
 default, so syncing a long-running project does not pull in its whole
 history. Set `ticktick-import-completed-tasks` to `t` if you want them.
 
-Tasks marked "won't do" in TickTick are not written to the org file yet, as
-Org has no keyword to map them onto.
+Tasks marked "won't do" in TickTick become `CANCELLED` in Org, and back
+again on the way out. Org does not know that keyword by default, so a
+`#+TODO: TODO | DONE CANCELLED` line is added to the top of the sync file
+the first time one shows up — without it, Org would read `CANCELLED` as the
+first word of the task's title. Change the keyword with
+`ticktick-wont-do-keyword`.
 
 ### Automatic Syncing
 
@@ -190,6 +197,7 @@ Org priorities are mapped to TickTick priorities.
 
 - `TODO` - Open task
 - `DONE` - Completed task
+- `CANCELLED` - Marked "won't do" in TickTick
 
 ### Tags
 

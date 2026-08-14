@@ -245,8 +245,8 @@ A busy project can exceed the filter endpoint's 200-task limit."
    (let ((org (ticktick-test--org-contents)))
      (should (string-match-p (regexp-quote ticktick-test-completed) org))
      (should (string-match-p "^\\*\\* DONE " org))
-     ;; "won't do" still has no keyword to map onto, so it stays out
-     (should-not (string-match-p (regexp-quote ticktick-test-wont-do) org)))))
+     (should (string-match-p (regexp-quote ticktick-test-wont-do) org))
+     (should (string-match-p "^\\*\\* CANCELLED " org)))))
 
 (ert-deftest ticktick-test-tracked-task-is-updated-when-completed ()
   "A task already in the file follows the server even when import is off."
@@ -267,8 +267,52 @@ A busy project can exceed the filter endpoint's 200-task limit."
    (with-current-buffer (find-file-noselect ticktick-sync-file)
      (org-with-wide-buffer
       (goto-char (ticktick--find-task-by-id-in-org ticktick-test-wont-do))
-      ;; left exactly as the fixture wrote it, not rewritten from the server
-      (should (equal (org-entry-get nil "TICKTICK_ETAG") "stale"))))))
+      (should (equal (org-get-todo-state) ticktick-wont-do-keyword))))))
+
+;;; "Won't do" tasks
+
+(ert-deftest ticktick-test-wont-do-keyword-is-registered-in-the-file ()
+  "An unknown keyword would be read as part of the heading title."
+  (ticktick-test--with-env
+   (ticktick-test--org-file (list ticktick-test-wont-do))
+   (let ((ticktick-import-completed-tasks t))
+     (ticktick-fetch-to-org))
+   (should (string-match-p "^#\\+TODO:.*CANCELLED"
+                           (ticktick-test--org-contents)))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-wont-do))
+      ;; the keyword must be a keyword, not the first word of the title
+      (should (equal (org-get-todo-state) "CANCELLED"))
+      (should-not (string-match-p "CANCELLED" (org-get-heading t t t t)))))))
+
+(ert-deftest ticktick-test-wont-do-survives-the-round-trip ()
+  "Reading the heading back must give status -1, not 2.
+The keyword is a done-type one, so going by type alone would report a
+cancelled task to TickTick as completed."
+  (ticktick-test--with-env
+   (ticktick-test--org-file (list ticktick-test-wont-do))
+   (let ((ticktick-import-completed-tasks t))
+     (ticktick-fetch-to-org))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-wont-do))
+      (let ((task (ticktick--heading-to-task)))
+        (should (equal (cdr (assoc "status" task)) -1))
+        (should (equal (cdr (assoc "title" task)) "Test task won't do")))))))
+
+(ert-deftest ticktick-test-done-and-open-still-round-trip ()
+  "The new keyword must not disturb the two existing states."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-import-completed-tasks t))
+     (ticktick-fetch-to-org))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-completed))
+      (should (equal (cdr (assoc "status" (ticktick--heading-to-task))) 2))
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
+      (should (equal (cdr (assoc "status" (ticktick--heading-to-task))) 0))))))
 
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

@@ -874,7 +874,11 @@ DATA is the optional request body data."
             (format ":TICKTICK_ID: %s" id)
             (format ":TICKTICK_ETAG: %s" (or etag ""))
             ":END:"
-            (when content (string-trim content))))
+            ;; An empty body must drop out entirely: keeping it would make
+            ;; `string-join' end the heading with a newline for some tasks
+            ;; and not others, which callers then cannot append to safely.
+            (let ((body (and content (string-trim content))))
+              (unless (or (null body) (string-empty-p body)) body))))
      "\n")))
 
 (defun ticktick--heading-to-task ()
@@ -963,7 +967,13 @@ Return the buffer position at the start of the heading."
             (unless (string= existing-etag etag)
               (delete-region (org-entry-beginning-position)
                              (org-entry-end-position))
-              (insert (ticktick--task-to-heading task))
+              ;; The deleted region ran up to the next heading and so took
+              ;; the entry's final newline with it; without one the next
+              ;; heading would be glued onto this task's body.
+              (insert (ticktick--task-to-heading task) "\n")
+              ;; Inserting leaves point on that next heading, so step back
+              ;; before stamping the sync metadata.
+              (goto-char existing-pos)
               (ticktick--update-sync-meta))))
       (save-excursion
         (goto-char project-pos)

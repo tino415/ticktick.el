@@ -153,5 +153,46 @@ remote deletion."
      (let ((org (ticktick-test--org-contents)))
        (should (string-match-p "^\\*\\* DONE " org))))))
 
+;;; Rewriting a heading in place
+
+(defun ticktick-test--level-2-count ()
+  "Number of level-2 headings in the sync file."
+  (with-current-buffer (find-file-noselect ticktick-sync-file)
+    (org-with-wide-buffer
+     (let ((n 0))
+       (goto-char (point-min))
+       (while (outline-next-heading)
+         (when (= (org-current-level) 2) (setq n (1+ n))))
+       n))))
+
+(ert-deftest ticktick-test-rewriting-a-task-keeps-later-headings ()
+  "Updating a task must not swallow the heading that follows it.
+The stored etags are stale, so every task in the listing takes the
+rewrite path.  The note is deliberately first: it is the only task in
+the fixtures with a non-empty body, and a rewritten heading can only
+run into the next one when it has a body to run on from."
+  (ticktick-test--with-env
+   (let ((known (list ticktick-test-note ticktick-test-active
+                      ticktick-test-sub-active ticktick-test-parent
+                      ticktick-test-checklist)))
+     (ticktick-test--org-file known)
+     (should (= (ticktick-test--level-2-count) (length known)))
+     (ticktick-fetch-to-org)
+     ;; Every task must still be a heading of its own.
+     (should (= (ticktick-test--level-2-count) (length known)))
+     (let ((org (ticktick-test--org-contents)))
+       ;; A glued heading shows up as text followed by stars mid-line.
+       (should-not (string-match-p "[^\n]\\*\\* " org))
+       (dolist (id known)
+         (should (string-match-p (regexp-quote id) org))))
+     ;; The sync metadata belongs to the task that was rewritten, not to
+     ;; whichever entry point happened to land on afterwards.
+     (with-current-buffer (find-file-noselect ticktick-sync-file)
+       (org-with-wide-buffer
+        (dolist (id known)
+          (goto-char (ticktick--find-task-by-id-in-org id))
+          (should (equal (org-entry-get nil "TICKTICK_ID") id))
+          (should (org-entry-get nil "SYNC_CACHE"))))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

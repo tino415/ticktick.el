@@ -97,6 +97,7 @@
 ;; - `ticktick-sync-interval': Enable automatic syncing every N minutes
 ;; - `ticktick-httpd-port': Port for OAuth callback server
 ;; - `ticktick-import-completed-tasks': Pull already-completed tasks into Org
+;; - `ticktick-wont-do-keyword': Org keyword for tasks marked "won't do"
 ;; - `ticktick-delete-behavior': How to handle deletions (ask/archive/delete/sync-only)
 ;; - `ticktick-archive-location': Where to archive deleted tasks (separate-file/archive-heading)
 ;; - `ticktick-archive-file': Path to archive file for deleted tasks
@@ -190,6 +191,15 @@ After changing this value, call `ticktick-toggle-sync-timer' to apply changes."
                  (const :tag "Archive instead of delete" archive)
                  (const :tag "Delete without confirmation" delete)
                  (const :tag "Never delete (sync only)" sync-only))
+  :group 'ticktick)
+
+(defcustom ticktick-wont-do-keyword "CANCELLED"
+  "Org keyword for TickTick tasks marked \"won't do\".
+TickTick reports these with a status of -1, which is neither open nor
+completed.  The keyword is added to `ticktick-sync-file' with a `#+TODO:'
+line if the file does not already know it, since an unrecognised keyword
+would be read as part of the heading title."
+  :type 'string
   :group 'ticktick)
 
 (defcustom ticktick-import-completed-tasks nil
@@ -915,7 +925,10 @@ read back as Org syntax."
      (delq nil
            (list
             (format "** %s%s %s%s"
-                    (if (= status 2) "DONE" "TODO")
+                    (pcase status
+                      (2 "DONE")
+                      (-1 ticktick-wont-do-keyword)
+                      (_ "TODO"))
                     (pcase priority (5 " [#A]") (3 " [#B]") (1 " [#C]") (_ ""))
                     title
                     (if (and tags (> (length tags) 0))
@@ -941,6 +954,10 @@ Org escaping is removed from the content."
   (let* ((el (org-element-at-point))
          (title (org-element-property :title el))
          (todo (org-element-property :todo-type el))
+         ;; The raw keyword matters as well as its type: the "won't do"
+         ;; keyword is a done-type one, so type alone would report those
+         ;; tasks as completed.
+         (keyword (org-element-property :todo-keyword el))
          (priority (org-element-property :priority el))
          (deadline (org-element-property :deadline el))
          (tags (org-element-property :tags el))
@@ -961,7 +978,10 @@ Org escaping is removed from the content."
                 (buffer-substring-no-properties (point) (point-max))))))))
     `(("id" . ,id)
       ("title" . ,title)
-      ("status" . ,(if (eq todo 'done) 2 0))
+      ("status" . ,(cond
+                    ((equal keyword ticktick-wont-do-keyword) -1)
+                    ((eq todo 'done) 2)
+                    (t 0)))
       ("priority" . ,(pcase priority (?A 5) (?B 3) (?C 1) (_ 0)))
       ("dueDate" . ,(when deadline
                       (format-time-string "%FT%T+0000"
@@ -1012,6 +1032,20 @@ Return the buffer position at the start of the heading."
     start))
 
 
+(defun ticktick--ensure-todo-keywords ()
+  "Teach the current buffer the keyword for \"won't do\" tasks.
+Org reads a keyword it does not know as part of the heading title, which
+would then be pushed back to TickTick as the task's name.  Does nothing
+if the buffer already knows `ticktick-wont-do-keyword'."
+  (unless (member ticktick-wont-do-keyword org-todo-keywords-1)
+    (org-with-wide-buffer
+     (goto-char (point-min))
+     ;; The whole sequence, not just the new keyword: a `#+TODO:' line
+     ;; replaces the buffer's keywords rather than adding to them, so
+     ;; naming only this one would stop DONE being recognised.
+     (insert (format "#+TODO: TODO | DONE %s\n" ticktick-wont-do-keyword)))
+    (org-mode-restart)))
+
 (defun ticktick--sync-task (task project-pos)
   "Sync a single TASK under PROJECT-POS, updating or creating as needed."
   (let* ((id (plist-get task :id))
@@ -1019,13 +1053,9 @@ Return the buffer position at the start of the heading."
          (status (plist-get task :status))
          (existing-pos (ticktick--find-task-under-project project-pos id)))
     (cond
-     ;; "Won't do" has no Org counterpart yet and would be written out as
-     ;; TODO, which reads as reopening a task the user closed.  Leave those
-     ;; entries alone until there is a keyword to map them to.
-     ((eql status -1) nil)
-     ;; Tasks that are already finished are not pulled into the file unless
-     ;; asked for.  Ones already in it are still updated below, so finishing
-     ;; a task in the app does reach Org.
+     ;; Tasks that are already closed -- completed or "won't do" -- are not
+     ;; pulled into the file unless asked for.  Ones already in it are still
+     ;; updated below, so closing a task in the app does reach Org.
      ((and (null existing-pos)
            (not (eql status 0))
            (not ticktick-import-completed-tasks))
@@ -1061,9 +1091,12 @@ Return the buffer position at the start of the heading."
 Used for tasks that disappeared from a project listing because they
 were completed rather than deleted, so that their new status still
 reaches the org file."
-  (let ((pos (ticktick--find-task-by-id-in-org task-id)))
-    (when pos
-      (with-current-buffer (find-file-noselect ticktick-sync-file)
+  (with-current-buffer (find-file-noselect ticktick-sync-file)
+    ;; Before locating anything: this may insert a line at the top of the
+    ;; buffer, which would invalidate a position found beforehand.
+    (ticktick--ensure-todo-keywords)
+    (let ((pos (ticktick--find-task-by-id-in-org task-id)))
+      (when pos
         (org-with-wide-buffer
          (goto-char pos)
          (let ((existing-etag (org-entry-get nil "TICKTICK_ETAG"))
@@ -1156,6 +1189,7 @@ Also detects and handles tasks deleted from TickTick since last sync."
 
       ;; Sync all projects and tasks
       (with-current-buffer (find-file-noselect ticktick-sync-file)
+        (ticktick--ensure-todo-keywords)
         (org-with-wide-buffer
          (dolist (project all-projects)
            (ticktick--sync-project project))

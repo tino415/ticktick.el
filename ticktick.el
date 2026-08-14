@@ -187,6 +187,15 @@ After changing this value, call `ticktick-toggle-sync-timer' to apply changes."
                  (const :tag "Never delete (sync only)" sync-only))
   :group 'ticktick)
 
+(defcustom ticktick-import-completed-tasks nil
+  "Whether to add tasks that are already completed to the org file.
+When nil, a task finished in TickTick before Org ever saw it is left
+out, so syncing an old project does not pull in years of history.
+Tasks already in the file are updated either way, so completing one in
+TickTick still marks it DONE in Org."
+  :type 'boolean
+  :group 'ticktick)
+
 (defcustom ticktick-archive-location 'separate-file
   "Where to archive deleted tasks.
 - `separate-file': Archive to a separate file specified by `ticktick-archive-file'
@@ -310,18 +319,47 @@ This is a plist with keys:
              (push id task-ids))))))
     (nreverse task-ids)))
 
+(defun ticktick--project-task-list (project-id)
+  "Return every task TickTick will tell us about for PROJECT-ID.
+
+Neither endpoint alone is enough.  The project listing omits tasks that
+are completed or marked \"won't do\", so on its own it makes finishing a
+task look like deleting it.  The filter endpoint reports every state but
+returns at most 200 tasks, and a busy project can exceed that -- dropping
+open tasks, which is far worse than dropping history.
+
+Taking both and merging on id keeps the guarantee that matters: open
+tasks always come from the listing, and the other states are added on top
+as far as the cap allows."
+  (let* ((listing (ignore-errors
+                    (ticktick-request
+                     "GET" (format "/open/v1/project/%s/data" project-id))))
+         (open (and listing (plist-get listing :tasks)))
+         (every (ignore-errors
+                  (ticktick-request "POST" "/open/v1/task/filter"
+                                    `(("projectIds" . (,project-id))))))
+         (seen (make-hash-table :test #'equal))
+         (tasks nil))
+    (dolist (task open)
+      (let ((id (plist-get task :id)))
+        (when (and id (not (gethash id seen)))
+          (puthash id t seen)
+          (push task tasks))))
+    (dolist (task every)
+      (let ((id (plist-get task :id)))
+        (when (and id (not (gethash id seen)))
+          (puthash id t seen)
+          (push task tasks))))
+    (nreverse tasks)))
+
 (defun ticktick--collect-api-task-ids (all-projects)
   "Extract all task IDs from ALL-PROJECTS API response.
 Returns a list of task IDs."
   (let ((task-ids nil))
     (dolist (project all-projects)
-      (let* ((project-id (plist-get project :id))
-             (project-data (ignore-errors
-                            (ticktick-request "GET" (format "/open/v1/project/%s/data" project-id))))
-             (tasks (when project-data (plist-get project-data :tasks))))
-        (dolist (task tasks)
-          (let ((id (plist-get task :id)))
-            (when id (push id task-ids))))))
+      (dolist (task (ticktick--project-task-list (plist-get project :id)))
+        (let ((id (plist-get task :id)))
+          (when id (push id task-ids)))))
     (nreverse task-ids)))
 
 (defun ticktick--collect-task-project-map ()
@@ -959,27 +997,45 @@ Return the buffer position at the start of the heading."
   "Sync a single TASK under PROJECT-POS, updating or creating as needed."
   (let* ((id (plist-get task :id))
          (etag (plist-get task :etag))
+         (status (plist-get task :status))
          (existing-pos (ticktick--find-task-under-project project-pos id)))
-    (if existing-pos
-        (save-excursion
-          (goto-char existing-pos)
-          (let ((existing-etag (org-entry-get nil "TICKTICK_ETAG")))
-            (unless (string= existing-etag etag)
-              (delete-region (org-entry-beginning-position)
-                             (org-entry-end-position))
-              ;; The deleted region ran up to the next heading and so took
-              ;; the entry's final newline with it; without one the next
-              ;; heading would be glued onto this task's body.
-              (insert (ticktick--task-to-heading task) "\n")
-              ;; Inserting leaves point on that next heading, so step back
-              ;; before stamping the sync metadata.
-              (goto-char existing-pos)
-              (ticktick--update-sync-meta))))
+    (cond
+     ;; "Won't do" has no Org counterpart yet and would be written out as
+     ;; TODO, which reads as reopening a task the user closed.  Leave those
+     ;; entries alone until there is a keyword to map them to.
+     ((eql status -1) nil)
+     ;; Tasks that are already finished are not pulled into the file unless
+     ;; asked for.  Ones already in it are still updated below, so finishing
+     ;; a task in the app does reach Org.
+     ((and (null existing-pos)
+           (not (eql status 0))
+           (not ticktick-import-completed-tasks))
+      nil)
+     (existing-pos
+      (save-excursion
+        (goto-char existing-pos)
+        (let ((existing-etag (org-entry-get nil "TICKTICK_ETAG")))
+          (unless (string= existing-etag etag)
+            (delete-region (org-entry-beginning-position)
+                           (org-entry-end-position))
+            ;; The deleted region ran up to the next heading and so took
+            ;; the entry's final newline with it; without one the next
+            ;; heading would be glued onto this task's body.
+            (insert (ticktick--task-to-heading task) "\n")
+            ;; Inserting leaves point on that next heading, so step back
+            ;; before stamping the sync metadata.
+            (goto-char existing-pos)
+            (ticktick--update-sync-meta)))))
+     (t
       (save-excursion
         (goto-char project-pos)
         (outline-next-heading)
-        (insert (ticktick--task-to-heading task) "\n")
-        (ticktick--update-sync-meta)))))
+        (let ((start (point)))
+          (insert (ticktick--task-to-heading task) "\n")
+          ;; Inserting leaves point on the following heading, so come back
+          ;; before stamping, or the metadata lands on someone else.
+          (goto-char start)
+          (ticktick--update-sync-meta)))))))
 
 (defun ticktick--refresh-org-task (task-id task)
   "Rewrite the org heading for TASK-ID from the server's TASK plist.
@@ -1016,10 +1072,8 @@ reaches the org file."
       (setq project-pos (ticktick--create-project-heading project-title project-id)))
     (goto-char project-pos)
     (outline-show-subtree)
-    (let* ((project-data (ticktick-request "GET" (format "/open/v1/project/%s/data" project-id)))
-           (tasks (plist-get project-data :tasks)))
-      (dolist (task tasks)
-        (ticktick--sync-task task project-pos)))))
+    (dolist (task (ticktick--project-task-list project-id))
+      (ticktick--sync-task task project-pos))))
 
 (defun ticktick--update-task (task project-id id)
   "Update existing task with TASK data, PROJECT-ID, and ID."

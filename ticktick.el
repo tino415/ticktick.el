@@ -1022,12 +1022,16 @@ read back as Org syntax."
     (string-join
      (delq nil
            (list
-            (format "%s %s%s %s%s"
+            (format "%s%s%s %s%s"
                     (make-string (or level 2) ?*)
-                    (pcase status
-                      (2 "DONE")
-                      (-1 ticktick-wont-do-keyword)
-                      (_ "TODO"))
+                    ;; A note is not something to be done, so it gets no
+                    ;; keyword at all -- just a plain heading.
+                    (if (equal kind "NOTE")
+                        ""
+                      (concat " " (pcase status
+                                    (2 "DONE")
+                                    (-1 ticktick-wont-do-keyword)
+                                    (_ "TODO"))))
                     (pcase priority (5 " [#A]") (3 " [#B]") (1 " [#C]") (_ ""))
                     title
                     (if (and tags (> (length tags) 0))
@@ -1069,6 +1073,11 @@ Org escaping is removed from the content."
          (tags (org-element-property :tags el))
          (id (org-entry-get nil "TICKTICK_ID"))
          (kind (org-entry-get nil "TICKTICK_KIND"))
+         ;; A heading with no keyword is a note -- either one that came
+         ;; from TickTick as such, or one written that way in Org.
+         ;; Without this the next push would turn every note into an open
+         ;; task.
+         (note (or (equal kind "NOTE") (null keyword)))
          (content
           (save-excursion
             (save-restriction
@@ -1102,6 +1111,11 @@ Org escaping is removed from the content."
                       (format-time-string "%FT%T+0000"
                                           (org-timestamp-to-time deadline))))
       ("tags" . ,(when tags (vconcat tags)))
+      ;; A checklist stays one whichever way its heading reads; otherwise
+      ;; the absence of a keyword is what marks a note.
+      ("kind" . ,(cond ((equal kind "CHECKLIST") "CHECKLIST")
+                       (note "NOTE")
+                       (t "TEXT")))
       ("content" . ,content))))
 
 (defun ticktick--task-heading-p ()

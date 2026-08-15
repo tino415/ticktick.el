@@ -198,6 +198,23 @@ Org priorities are mapped to TickTick priorities.
 - `TODO` - Open task
 - `DONE` - Completed task
 - `CANCELLED` - Marked "won't do" in TickTick
+- no keyword - A note rather than a task
+
+### Notes
+
+TickTick notes are not tasks, so they arrive as plain headings with no
+`TODO` keyword:
+
+```org
+** Ideas for the talk
+:PROPERTIES:
+:TICKTICK_ID: abc123
+:TICKTICK_KIND: NOTE
+:END:
+```
+
+This works the other way too — a heading you write without a keyword is
+pushed to TickTick as a note rather than an open task.
 
 ### Descriptions
 

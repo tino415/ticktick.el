@@ -687,5 +687,79 @@ Their ids have to stay in the snapshot even though nothing is written."
         (setq wrapped (ticktick--subtree-body-for-hash))))
      (should (equal bare wrapped)))))
 
+;;; Notes
+
+(ert-deftest ticktick-test-note-has-no-todo-keyword ()
+  "A note is not something to be done."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-note))
+      (should (equal (org-entry-get nil "TICKTICK_KIND") "NOTE"))
+      (should-not (org-get-todo-state))
+      ;; the title is the whole heading, not preceded by a keyword
+      (should (equal (org-get-heading t t t t) "Note containing"))))))
+
+(ert-deftest ticktick-test-ordinary-tasks-still-have-a-keyword ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
+      (should (equal (org-get-todo-state) "TODO"))))))
+
+(ert-deftest ticktick-test-note-does-not-become-a-task-on-push ()
+  "Pushing a note back must keep it a note."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-note))
+      (should (equal (cdr (assoc "kind" (ticktick--heading-to-task))) "NOTE"))))))
+
+(ert-deftest ticktick-test-a-keywordless-heading-is-pushed-as-a-note ()
+  "Writing a plain heading in Org is how a note is created."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** just a thought\n:PROPERTIES:\n:TICKTICK_ID: n-1\n:END:\n"))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org "n-1"))
+      (let ((task (ticktick--heading-to-task)))
+        (should (equal (cdr (assoc "kind" task)) "NOTE"))
+        (should (equal (cdr (assoc "title" task)) "just a thought")))))))
+
+(ert-deftest ticktick-test-checklist-stays-a-checklist-when-pushed ()
+  "The note rule must not reclassify a checklist."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      (should (equal (cdr (assoc "kind" (ticktick--heading-to-task)))
+                     "CHECKLIST"))))))
+
+(ert-deftest ticktick-test-notes-are-picked-up-for-pushing ()
+  "Candidates are chosen by level and property, not by keyword."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** a note with no keyword\n:PROPERTIES:\n:TICKTICK_ID: n-2\n:END:\n"))
+   (let (pushed)
+     (cl-letf (((symbol-function 'ticktick--update-task)
+                (lambda (task &rest _) (push (cdr (assoc "kind" task)) pushed)))
+               ((symbol-function 'ticktick--create-task)
+                (lambda (&rest _) nil)))
+       (ticktick-push-from-org)
+       (should (equal pushed '("NOTE")))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

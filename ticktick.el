@@ -189,6 +189,20 @@ After changing this value, call `ticktick-toggle-sync-timer' to apply changes."
                  (const :tag "Never delete (sync only)" sync-only))
   :group 'ticktick)
 
+(defcustom ticktick-subheading-behavior 'fold
+  "What a heading nested under a task means.
+- `fold': the nested heading and its text are part of the task's
+  description, which is how this package has always behaved.  TickTick
+  shows them as text; no nested task is created.
+- `subtask': the nested heading is its own TickTick task, linked to the
+  one above it, and no longer part of that task's description.
+
+Switching to `subtask' moves any nested headings you already have out of
+their parent's description and creates them as tasks on the next sync."
+  :type '(choice (const :tag "Part of the description" fold)
+                 (const :tag "A subtask of its own" subtask))
+  :group 'ticktick)
+
 (defcustom ticktick-wont-do-keyword "CANCELLED"
   "Org keyword for TickTick tasks marked \"won't do\".
 TickTick reports these with a status of -1, which is neither open nor
@@ -996,7 +1010,10 @@ Org escaping is removed from the content."
          (content
           (save-excursion
             (save-restriction
-              (org-narrow-to-subtree)
+              ;; The same region the hash covers, so a change that gets
+              ;; sent is always a change that was detected.
+              (narrow-to-region (org-entry-beginning-position)
+                                (ticktick--content-end-position))
               (goto-char (point-min))
               (forward-line)
               (while (looking-at org-planning-line-re)
@@ -1022,10 +1039,25 @@ Org escaping is removed from the content."
       ("tags" . ,(when tags (vconcat tags)))
       ("content" . ,content))))
 
+(defun ticktick--content-end-position ()
+  "Return where the current task's content ends.
+Under `fold' that is the end of the whole subtree, since nested headings
+are part of the description; under `subtask' it is the start of the first
+nested heading, since those are tasks of their own.
+
+Change detection and the content that gets sent must agree on this, or
+the region deciding *whether* to push differs from the region deciding
+*what* is pushed -- which is how edits to a nested heading used to be
+skipped silently."
+  (if (eq ticktick-subheading-behavior 'subtask)
+      (org-entry-end-position)
+    (save-excursion (org-end-of-subtree t t) (point))))
+
 (defun ticktick--subtree-body-for-hash ()
   "Return a stable string of the current subtree, with volatile props removed."
   (let* ((raw (buffer-substring-no-properties
-               (org-entry-beginning-position) (org-entry-end-position))))
+               (org-entry-beginning-position)
+               (ticktick--content-end-position))))
     (with-temp-buffer
       (insert raw)
       (goto-char (point-min))

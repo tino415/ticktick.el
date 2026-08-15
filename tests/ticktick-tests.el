@@ -368,5 +368,73 @@ Sending it back as the description would duplicate every item as text."
       (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
       (should-not (org-entry-get nil "TICKTICK_KIND"))))))
 
+;;; Nested headings
+
+(defun ticktick-test--nested-file ()
+  "Write a task with a nested heading under it, and return to the task."
+  (with-temp-file ticktick-sync-file
+    (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+            ticktick-test-project-id "\n:END:\n"
+            "** TODO parent\n:PROPERTIES:\n:TICKTICK_ID: p-1\n"
+            ":TICKTICK_ETAG: e1\n:END:\n"
+            "parent body\n"
+            "*** TODO child\n:PROPERTIES:\n:TICKTICK_ID: c-1\n"
+            ":TICKTICK_ETAG: e2\n:END:\n"
+            "child body\n")))
+
+(defmacro ticktick-test--at-parent (&rest body)
+  `(with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org "p-1"))
+      ,@body)))
+
+(ert-deftest ticktick-test-fold-sends-nested-heading-as-content ()
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'fold))
+     (ticktick-test--at-parent
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should (string-match-p "parent body" content))
+        (should (string-match-p "child body" content)))))))
+
+(ert-deftest ticktick-test-subtask-keeps-nested-heading-out-of-content ()
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'subtask))
+     (ticktick-test--at-parent
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should (string-match-p "parent body" content))
+        (should-not (string-match-p "child body" content)))))))
+
+(ert-deftest ticktick-test-fold-notices-an-edit-to-a-nested-heading ()
+  "The whole point of #7: what is hashed must cover what is sent.
+Under `fold' a nested heading is part of the description, so editing it
+has to mark the task as needing a push."
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'fold))
+     (ticktick-test--at-parent
+      (ticktick--update-sync-meta)
+      (should-not (ticktick--should-sync-p))
+      ;; edit the child's body, leaving the parent's own text alone
+      (save-excursion
+        (goto-char (point-max))
+        (re-search-backward "^child body$")
+        (end-of-line)
+        (insert " changed"))
+      (should (ticktick--should-sync-p))))))
+
+(ert-deftest ticktick-test-fold-hash-ignores-a-nested-tasks-own-metadata ()
+  "A child's property drawer must not leak into the parent's digest."
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'fold))
+     (ticktick-test--at-parent
+      (let ((body (ticktick--subtree-body-for-hash)))
+        (should (string-match-p "child body" body))
+        (should-not (string-match-p "TICKTICK_ID" body))
+        (should-not (string-match-p "TICKTICK_ETAG" body))
+        (should-not (string-match-p ":PROPERTIES:" body)))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

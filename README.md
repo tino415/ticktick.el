@@ -199,6 +199,28 @@ Org priorities are mapped to TickTick priorities.
 - `DONE` - Completed task
 - `CANCELLED` - Marked "won't do" in TickTick
 
+### Descriptions
+
+TickTick descriptions are markdown, so they are kept in a source block
+rather than as bare Org text — otherwise markdown lists, headings and
+emphasis would be read as Org syntax:
+
+```org
+** TODO Write the report
+:PROPERTIES:
+:TICKTICK_ID: abc123
+:END:
+#+begin_src markdown
+- outline first
+- **then** the detail
+#+end_src
+```
+
+Set `ticktick-content-as-src-block` to `nil` for bare text instead.
+Descriptions written before this existed are still read back either way,
+and gain the block the next time the task changes. Switching the option
+does not by itself make tasks look edited.
+
 ### Archived Lists
 
 A list archived in TickTick keeps syncing, with an `:archived:` tag on its

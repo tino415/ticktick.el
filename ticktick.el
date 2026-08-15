@@ -96,6 +96,7 @@
 ;; - `ticktick-import-completed-tasks': Pull already-completed tasks into Org
 ;; - `ticktick-subheading-behavior': Nested heading as description or subtask
 ;; - `ticktick-archived-project-behavior': Tag or skip archived lists
+;; - `ticktick-content-as-src-block': Keep descriptions in a markdown block
 ;; - `ticktick-wont-do-keyword': Org keyword for tasks marked "won't do"
 ;; - `ticktick-delete-behavior': How to handle deletions (ask/archive/delete/sync-only)
 ;; - `ticktick-archive-location': Where to archive deleted tasks (separate-file/archive-heading)
@@ -189,6 +190,18 @@ After changing this value, call `ticktick-toggle-sync-timer' to apply changes."
                  (const :tag "Archive instead of delete" archive)
                  (const :tag "Delete without confirmation" delete)
                  (const :tag "Never delete (sync only)" sync-only))
+  :group 'ticktick)
+
+(defcustom ticktick-content-as-src-block t
+  "Whether to keep a task's description in a markdown source block.
+TickTick descriptions are markdown, and Org would otherwise read their
+lists, headings and emphasis as its own syntax.  A block also makes the
+escaping of lines starting with `*' or `#+' invisible, which in ordinary
+body text shows up as a literal leading comma.
+
+Descriptions written before this was switched on are still read back
+correctly; they gain the block the next time the task changes."
+  :type 'boolean
   :group 'ticktick)
 
 (defcustom ticktick-archived-project-behavior 'tag
@@ -938,6 +951,26 @@ DATA is the optional request body data."
 (defconst ticktick--checkbox-line-re "^[ \t]*- \\[[ Xx-]\\] "
   "Regexp matching one line of a checklist rendered as org checkboxes.")
 
+(defconst ticktick--src-block-re
+  "\\`[ \t]*#\\+begin_src markdown[ \t]*\n\\(\\(?:.\\|\n\\)*\\)\n[ \t]*#\\+end_src[ \t]*\\'"
+  "Regexp matching a whole description wrapped in a markdown src block.")
+
+(defun ticktick--wrap-content (body)
+  "Put BODY in a markdown src block, unless that is switched off."
+  (if ticktick-content-as-src-block
+      (format "#+begin_src markdown\n%s\n#+end_src" body)
+    body))
+
+(defun ticktick--unwrap-content (body)
+  "Return what a markdown src block in BODY holds, or BODY unchanged.
+Descriptions written before wrapping was introduced are bare, and a user
+may have switched the option off, so both shapes have to read back.  A
+literal \"#+end_src\" inside the description cannot end the block early:
+`org-escape-code-in-string' has already commented it out."
+  (if (string-match ticktick--src-block-re body)
+      (match-string 1 body)
+    body))
+
 (defun ticktick--strip-checkboxes-if-checklist (kind body)
   "Return BODY without its checkbox lines when KIND is \"CHECKLIST\".
 The checkbox list is a rendering of the task's items, not part of its
@@ -1017,7 +1050,7 @@ read back as Org syntax."
             ;; and not others, which callers then cannot append to safely.
             (let ((body (and content (string-trim content))))
               (unless (or (null body) (string-empty-p body))
-                (org-escape-code-in-string body)))
+                (ticktick--wrap-content (org-escape-code-in-string body))))
             (ticktick--items-to-checkboxes items)))
      "\n")))
 
@@ -1050,11 +1083,14 @@ Org escaping is removed from the content."
               (when (looking-at ":PROPERTIES:")
                 (re-search-forward "^:END:" nil t)
                 (forward-line))
-              (ticktick--strip-checkboxes-if-checklist
-               kind
-               (org-unescape-code-in-string
-                (string-trim
-                 (buffer-substring-no-properties (point) (point-max)))))))))
+              ;; Checkboxes sit outside the block, so they go first; the
+              ;; block is unwrapped before its contents are unescaped.
+              (org-unescape-code-in-string
+               (ticktick--unwrap-content
+                (ticktick--strip-checkboxes-if-checklist
+                 kind
+                 (string-trim
+                  (buffer-substring-no-properties (point) (point-max))))))))))
     `(("id" . ,id)
       ("title" . ,title)
       ("status" . ,(cond
@@ -1117,6 +1153,14 @@ skipped silently."
       (goto-char (point-min))
       (while (re-search-forward
               "^:\\(LAST_SYNCED\\|SYNC_CACHE\\|TICKTICK_ETAG\\|TICKTICK_ID\\):.*\n" nil t)
+        (replace-match "" nil nil))
+      ;; The src block delimiters are packaging, not content.  Ignoring
+      ;; them keeps a description's digest the same as it gains or loses
+      ;; the block, so switching `ticktick-content-as-src-block' does not
+      ;; make every task look edited and push itself back.
+      (goto-char (point-min))
+      (while (re-search-forward
+              "^[ \t]*#\\+\\(?:begin_src markdown\\|end_src\\)[ \t]*\n?" nil t)
         (replace-match "" nil nil))
       (buffer-string))))
 

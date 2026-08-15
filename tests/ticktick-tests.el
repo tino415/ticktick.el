@@ -601,5 +601,91 @@ Their ids have to stay in the snapshot even though nothing is written."
    (should (member ticktick-test-active
                    (plist-get ticktick--sync-state :api-task-ids)))))
 
+;;; Descriptions as markdown blocks
+
+(ert-deftest ticktick-test-description-is-wrapped-in-a-src-block ()
+  "The note fixture's body is markdown bullets, which Org would eat."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-note))
+      (let ((body (buffer-substring-no-properties
+                   (point) (org-entry-end-position))))
+        (should (string-match-p "#\\+begin_src markdown" body))
+        (should (string-match-p "#\\+end_src" body))
+        ;; still escaped inside the block, so the bullets stay text
+        (should (string-match-p "^,\\* link one" body)))))))
+
+(ert-deftest ticktick-test-wrapped-description-round-trips ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-note))
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should (equal content "* link one\n* link two \n* link three")))))))
+
+(ert-deftest ticktick-test-bare-description-still-reads-back ()
+  "Files written before wrapping must keep working."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** TODO old\n:PROPERTIES:\n:TICKTICK_ID: old-1\n:END:\n"
+             "just some text\n"))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org "old-1"))
+      (should (equal (cdr (assoc "content" (ticktick--heading-to-task)))
+                     "just some text"))))))
+
+(ert-deftest ticktick-test-end-src-in-a-description-cannot-break-out ()
+  (ticktick-test--with-env
+   (let ((heading (ticktick--task-to-heading
+                   '(:id "x" :title "T" :status 0 :priority 0 :etag "e"
+                         :content "before\n#+end_src\nafter"))))
+     ;; exactly one unescaped terminator: the block's own
+     (let ((terminators 0)
+           (start 0))
+       (while (string-match "^#\\+end_src$" heading start)
+         (setq terminators (1+ terminators)
+               start (match-end 0)))
+       (should (= terminators 1)))
+     ;; the one in the description was commented out instead
+     (should (string-match-p "^,#\\+end_src$" heading))
+     ;; and it survives the trip back
+     (should (equal (ticktick--unwrap-content
+                     (ticktick--wrap-content
+                      (org-escape-code-in-string "before\n#+end_src\nafter")))
+                    (org-escape-code-in-string "before\n#+end_src\nafter"))))))
+
+(ert-deftest ticktick-test-wrapping-does-not-change-the-digest ()
+  "Gaining the block must not make a task look edited."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** TODO t\n:PROPERTIES:\n:TICKTICK_ID: t-1\n:END:\n"
+             "some text\n"))
+   (let (bare wrapped)
+     (with-current-buffer (find-file-noselect ticktick-sync-file)
+       (org-with-wide-buffer
+        (goto-char (ticktick--find-task-by-id-in-org "t-1"))
+        (setq bare (ticktick--subtree-body-for-hash))))
+     (with-temp-file ticktick-sync-file
+       (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+               ticktick-test-project-id "\n:END:\n"
+               "** TODO t\n:PROPERTIES:\n:TICKTICK_ID: t-1\n:END:\n"
+               "#+begin_src markdown\nsome text\n#+end_src\n"))
+     (with-current-buffer (find-file-noselect ticktick-sync-file)
+       (revert-buffer t t t)
+       (org-with-wide-buffer
+        (goto-char (ticktick--find-task-by-id-in-org "t-1"))
+        (setq wrapped (ticktick--subtree-body-for-hash))))
+     (should (equal bare wrapped)))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

@@ -389,7 +389,7 @@ This is a plist with keys:
 
 (defun ticktick--project-archived-p (project)
   "Return non-nil if PROJECT has been archived in TickTick.
-Only a real `t' counts: JSON false parses to the symbol `:json-false',
+Only a real boolean true counts: JSON false parses to `:json-false',
 which is itself truthy, so testing the field directly would report every
 project as archived."
   (eq (plist-get project :closed) t))
@@ -975,7 +975,7 @@ DATA is the optional request body data."
     body))
 
 (defun ticktick--unwrap-content (body)
-  "Return what a markdown src block in BODY holds, or BODY unchanged.
+  "Return the contents of a markdown src block in BODY, or BODY unchanged.
 Descriptions written before wrapping was introduced are bare, and a user
 may have switched the option off, so both shapes have to read back.  A
 literal \"#+end_src\" inside the description cannot end the block early:

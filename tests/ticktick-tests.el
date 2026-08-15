@@ -436,5 +436,96 @@ has to mark the task as needing a push."
         (should-not (string-match-p "TICKTICK_ETAG" body))
         (should-not (string-match-p ":PROPERTIES:" body)))))))
 
+;;; Subtasks
+
+(defun ticktick-test--level-of (id)
+  "Outline level of the heading carrying ID, or nil."
+  (with-current-buffer (find-file-noselect ticktick-sync-file)
+    (org-with-wide-buffer
+     (let ((pos (ticktick--find-task-by-id-in-org id)))
+       (when pos (goto-char pos) (org-current-level))))))
+
+(ert-deftest ticktick-test-fold-leaves-subtasks-flat ()
+  "The default must keep every task at level 2, as it always has."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-subheading-behavior 'fold))
+     (ticktick-fetch-to-org))
+   (should (= (ticktick-test--level-of ticktick-test-parent) 2))
+   (should (= (ticktick-test--level-of ticktick-test-sub-active) 2))))
+
+(ert-deftest ticktick-test-subtask-nests-a-child-under-its-parent ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-subheading-behavior 'subtask))
+     (ticktick-fetch-to-org))
+   (should (= (ticktick-test--level-of ticktick-test-parent) 2))
+   (should (= (ticktick-test--level-of ticktick-test-sub-active) 3))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-sub-active))
+      ;; the link back is recorded, and the parent really is the parent
+      (should (equal (org-entry-get nil "TICKTICK_PARENT_ID")
+                     ticktick-test-parent))
+      (org-up-heading-safe)
+      (should (equal (org-entry-get nil "TICKTICK_ID") ticktick-test-parent))))))
+
+(ert-deftest ticktick-test-subtask-orphan-stays-at-top-level ()
+  "A child whose parent is not in the listing must still appear.
+Its parent may be completed, deleted, or past the filter's limit."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-subheading-behavior 'subtask)
+         (ticktick-import-completed-tasks t))
+     (cl-letf* ((real (symbol-function 'ticktick--project-task-list))
+                ((symbol-function 'ticktick--project-task-list)
+                 (lambda (pid)
+                   ;; drop the parent, keep the child pointing at it
+                   (cl-remove-if (lambda (tk)
+                                   (equal (plist-get tk :id) ticktick-test-parent))
+                                 (funcall real pid)))))
+       (ticktick-fetch-to-org)))
+   (should (= (ticktick-test--level-of ticktick-test-sub-active) 2))))
+
+(ert-deftest ticktick-test-subtask-mode-pushes-a-nested-heading-as-a-task ()
+  "Under `subtask' a level-3 heading is pushed, carrying its parent's id."
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'subtask)
+         (created nil))
+     (cl-letf (((symbol-function 'ticktick--create-task)
+                (lambda (task project-id &optional parent-id)
+                  (push (list (cdr (assoc "title" task)) project-id parent-id)
+                        created)))
+               ((symbol-function 'ticktick--update-task)
+                (lambda (&rest _) nil)))
+       ;; the child has no TICKTICK_ID of its own yet
+       (with-current-buffer (find-file-noselect ticktick-sync-file)
+         (org-with-wide-buffer
+          (goto-char (ticktick--find-task-by-id-in-org "c-1"))
+          (org-entry-delete nil "TICKTICK_ID")
+          (save-buffer)))
+       (ticktick-push-from-org)
+       (should (equal created (list (list "child" ticktick-test-project-id "p-1"))))))))
+
+(ert-deftest ticktick-test-fold-mode-does-not-push-nested-headings ()
+  "Under `fold' a nested heading is description text, not a task."
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'fold)
+         (created nil))
+     (cl-letf (((symbol-function 'ticktick--create-task)
+                (lambda (task &rest _)
+                  (push (cdr (assoc "title" task)) created)))
+               ((symbol-function 'ticktick--update-task)
+                (lambda (&rest _) nil)))
+       (with-current-buffer (find-file-noselect ticktick-sync-file)
+         (org-with-wide-buffer
+          (goto-char (ticktick--find-task-by-id-in-org "c-1"))
+          (org-entry-delete nil "TICKTICK_ID")
+          (save-buffer)))
+       (ticktick-push-from-org)
+       (should (null created))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

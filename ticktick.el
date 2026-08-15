@@ -398,6 +398,15 @@ which is itself truthy, so testing the field directly would report every
 project as archived."
   (eq (plist-get project :closed) t))
 
+(defconst ticktick--filter-task-limit 200
+  "Most tasks `/open/v1/task/filter' returns in one reply.
+A project at this figure may have more that were not sent.")
+
+(defvar ticktick--snapshot-complete nil
+  "Non-nil when the snapshot being taken lists every task there is.
+Absence from a complete snapshot is proof that a task is gone; absence
+from a truncated one proves nothing.")
+
 (defun ticktick--project-task-list (project-id)
   "Return every task TickTick will tell us about for PROJECT-ID.
 
@@ -419,6 +428,12 @@ as far as the cap allows."
                                     `(("projectIds" . (,project-id))))))
          (seen (make-hash-table :test #'equal))
          (tasks nil))
+    ;; Note whether this listing can be trusted to be exhaustive.  Only
+    ;; then does a task's absence from it mean anything.
+    (when (or (null listing)                 ; the listing request failed
+              (and open (null every))        ; the filter request failed
+              (and every (>= (length every) ticktick--filter-task-limit)))
+      (setq ticktick--snapshot-complete nil))
     (dolist (task open)
       (let ((id (plist-get task :id)))
         (when (and id (not (gethash id seen)))
@@ -435,6 +450,7 @@ as far as the cap allows."
   "Extract all task IDs from ALL-PROJECTS API response.
 Returns a list of task IDs."
   (let ((task-ids nil))
+    (setq ticktick--snapshot-complete t)
     (dolist (project all-projects)
       (dolist (task (ticktick--project-task-list (plist-get project :id)))
         (let ((id (plist-get task :id)))
@@ -499,7 +515,13 @@ Return the task plist when the server still has the task, the symbol
 `missing' when the server confirms it is gone, or nil when the question
 could not be answered at all.  Callers must treat nil as \"unknown\"
 rather than \"deleted\".  RETRIED is set internally when re-trying once
-after refreshing an expired token."
+after refreshing an expired token.
+
+Note what this cannot tell you: a task deleted recently still answers
+with its full body, for as long as it stays in the trash -- observed a
+day later.  Only once TickTick clears it does the reply go empty.  So
+this confirms that a task exists, never that it was just deleted; use
+absence from a complete snapshot for that."
   (ticktick-ensure-token)
   (let ((url (format "%s/open/v1/project/%s/task/%s"
                      ticktick--api-base-url project-id task-id))
@@ -1602,13 +1624,20 @@ Also detects and handles tasks deleted from TickTick since last sync."
         (let ((candidates (cl-set-difference previous-api-ids current-api-ids
                                              :test #'string=)))
           (when candidates
-            (let ((checked (ticktick--verify-api-deletions candidates)))
-              (dolist (entry (plist-get checked :alive))
-                (ticktick--refresh-org-task (car entry) (cdr entry))
-                ;; Keep tasks that still exist in the snapshot, otherwise
-                ;; every later sync would flag them as deleted again.
-                (push (car entry) current-api-ids))
-              (ticktick--handle-api-deletions (plist-get checked :deleted))))))
+            (if ticktick--snapshot-complete
+                ;; Everything TickTick has was listed, and a deleted task
+                ;; is the one thing that does not appear -- completed and
+                ;; "won't do" tasks do.  So absence settles it, which
+                ;; asking after each task cannot: a deleted task stays
+                ;; fetchable by id for as long as it sits in the trash.
+                (ticktick--handle-api-deletions candidates)
+              (let ((checked (ticktick--verify-api-deletions candidates)))
+                (dolist (entry (plist-get checked :alive))
+                  (ticktick--refresh-org-task (car entry) (cdr entry))
+                  ;; Keep tasks that still exist in the snapshot, otherwise
+                  ;; every later sync would flag them as deleted again.
+                  (push (car entry) current-api-ids))
+                (ticktick--handle-api-deletions (plist-get checked :deleted)))))))
 
       ;; Sync all projects and tasks
       (with-current-buffer (find-file-noselect ticktick-sync-file)

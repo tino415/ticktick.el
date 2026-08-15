@@ -21,6 +21,9 @@
 (defconst ticktick-test-sub-active  "6a7f045c6cca911364cd20ba") ; status 0
 (defconst ticktick-test-sub-done    "6a7f046c2bb4111364cd2141") ; status 2
 (defconst ticktick-test-deleted     "6a7f0477246a511364cd21c8") ; really deleted
+;; Deleted too, but recorded while still in the trash: absent from both
+;; listings, yet a direct request still returns its body.
+(defconst ticktick-test-sub-deleted-alive "6a7f04605db5d11364cd20c7")
 (defconst ticktick-test-checklist   "6a7f048b7b68911364cd2283") ; kind CHECKLIST
 (defconst ticktick-test-note        "6a7f04a47d3ed11364cd2381") ; kind NOTE
 
@@ -927,6 +930,71 @@ has to stay live Org so that a nested heading survives."
    (let ((ticktick-subheading-behavior 'subtask))
      (should (string-match-p "^### Child$"
                              (ticktick-test--render "### Child"))))))
+
+;;; Confirming a deletion
+
+(ert-deftest ticktick-test-absence-from-a-complete-snapshot-is-a-deletion ()
+  "A task the snapshot does not list is gone, and it is acted on at once.
+Waiting for the direct request to report it missing would mean waiting
+for TickTick to empty its trash."
+  (ticktick-test--with-env
+   (let ((known (list ticktick-test-active "deleted-while-away")))
+     (ticktick-test--org-file known)
+     (setq ticktick--sync-state
+           (plist-put ticktick--sync-state :api-task-ids known))
+     (setq ticktick-delete-behavior 'delete)
+     (ticktick-fetch-to-org)
+     (should ticktick--snapshot-complete)
+     (should (equal ticktick-test--deleted-from-org '("deleted-while-away"))))))
+
+(ert-deftest ticktick-test-a-trashed-task-still-answering-is-not-kept ()
+  "The fixtures include a deleted task that still returns its body.
+It must still be removed, because the snapshot does not list it."
+  (ticktick-test--with-env
+   (let ((known (list ticktick-test-active ticktick-test-sub-deleted-alive)))
+     (ticktick-test--org-file known)
+     (setq ticktick--sync-state
+           (plist-put ticktick--sync-state :api-task-ids known))
+     (setq ticktick-delete-behavior 'delete)
+     (ticktick-fetch-to-org)
+     (should (equal ticktick-test--deleted-from-org
+                    (list ticktick-test-sub-deleted-alive))))))
+
+(ert-deftest ticktick-test-a-truncated-snapshot-is-not-trusted ()
+  "At the cap the listing may be short, so absence proves nothing."
+  (ticktick-test--with-env
+   (cl-letf* ((real (symbol-function 'ticktick-request))
+              ((symbol-function 'ticktick-request)
+               (lambda (method endpoint &optional data)
+                 (if (equal endpoint "/open/v1/task/filter")
+                     ;; pretend this project filled the reply
+                     (let ((tasks (funcall real method endpoint data)))
+                       (append tasks
+                               (cl-loop for i from 1 to 200
+                                        collect (list :id (format "filler-%d" i)
+                                                      :status 0))))
+                   (funcall real method endpoint data)))))
+     (let ((known (list ticktick-test-active ticktick-test-sub-deleted-alive)))
+       (ticktick-test--org-file known)
+       (setq ticktick--sync-state
+             (plist-put ticktick--sync-state :api-task-ids known))
+       (setq ticktick-delete-behavior 'delete)
+       (ticktick-fetch-to-org)
+       (should-not ticktick--snapshot-complete)
+       ;; falls back to asking, and that task still answers, so it stays
+       (should (null ticktick-test--deleted-from-org))))))
+
+(ert-deftest ticktick-test-completed-task-is-never-a-deletion-candidate ()
+  "The regression from #9 must still hold under the new rule."
+  (ticktick-test--with-env
+   (let ((known (list ticktick-test-active ticktick-test-completed
+                      ticktick-test-wont-do)))
+     (ticktick-test--org-file known)
+     (setq ticktick--sync-state
+           (plist-put ticktick--sync-state :api-task-ids known))
+     (setq ticktick-delete-behavior 'delete)
+     (ticktick-fetch-to-org)
+     (should (null ticktick-test--deleted-from-org)))))
 
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

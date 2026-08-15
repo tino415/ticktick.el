@@ -95,6 +95,7 @@
 ;; - `ticktick-httpd-port': Port for OAuth callback server
 ;; - `ticktick-import-completed-tasks': Pull already-completed tasks into Org
 ;; - `ticktick-subheading-behavior': Nested heading as description or subtask
+;; - `ticktick-archived-project-behavior': Tag or skip archived lists
 ;; - `ticktick-wont-do-keyword': Org keyword for tasks marked "won't do"
 ;; - `ticktick-delete-behavior': How to handle deletions (ask/archive/delete/sync-only)
 ;; - `ticktick-archive-location': Where to archive deleted tasks (separate-file/archive-heading)
@@ -188,6 +189,18 @@ After changing this value, call `ticktick-toggle-sync-timer' to apply changes."
                  (const :tag "Archive instead of delete" archive)
                  (const :tag "Delete without confirmation" delete)
                  (const :tag "Never delete (sync only)" sync-only))
+  :group 'ticktick)
+
+(defcustom ticktick-archived-project-behavior 'tag
+  "What to do with lists that have been archived in TickTick.
+- `tag': keep syncing them, with an :archived: tag on the project
+  heading.  Un-archiving a list removes the tag again.
+- `skip': leave them out of the org file.
+
+Either way their tasks stay accounted for internally, so archiving a
+list in TickTick never looks like its tasks were deleted."
+  :type '(choice (const :tag "Tag the project heading" tag)
+                 (const :tag "Leave them out" skip))
   :group 'ticktick)
 
 (defcustom ticktick-subheading-behavior 'fold
@@ -344,6 +357,16 @@ This is a plist with keys:
            (when (and id (not (string-empty-p id)))
              (push id task-ids))))))
     (nreverse task-ids)))
+
+(defconst ticktick--archived-tag "archived"
+  "Org tag put on the heading of a list archived in TickTick.")
+
+(defun ticktick--project-archived-p (project)
+  "Return non-nil if PROJECT has been archived in TickTick.
+Only a real `t' counts: JSON false parses to the symbol `:json-false',
+which is itself truthy, so testing the field directly would report every
+project as archived."
+  (eq (plist-get project :closed) t))
 
 (defun ticktick--project-task-list (project-id)
   "Return every task TickTick will tell us about for PROJECT-ID.
@@ -1112,6 +1135,20 @@ skipped silently."
 
 ;;; Sync functions -------------------------------------------------------------
 
+(defun ticktick--find-project-heading (project-id)
+  "Return the position of the heading carrying PROJECT-ID, or nil.
+Matching on the id rather than the title means a heading still gets
+found once it carries a tag, or once the list has been renamed in
+TickTick -- either of which used to produce a second heading for the
+same project."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward
+           (format "^:TICKTICK_PROJECT_ID: %s$" (regexp-quote project-id))
+           nil t)
+      (org-back-to-heading t)
+      (point))))
+
 (defun ticktick--create-project-heading (project-title project-id)
   "Insert a new Org heading for PROJECT-TITLE with PROJECT-ID.
 Return the buffer position at the start of the heading."
@@ -1216,13 +1253,19 @@ reaches the org file."
   (let* ((project-id (plist-get project :id))
          (project-title (plist-get project :name))
          (project-heading-re (format "^\\* %s$" (regexp-quote project-title)))
-         (project-pos (save-excursion
-                        (goto-char (point-min))
-                        (when (re-search-forward project-heading-re nil t)
-                          (match-beginning 0)))))
+         (project-pos (or (ticktick--find-project-heading project-id)
+                          (save-excursion
+                            (goto-char (point-min))
+                            (when (re-search-forward project-heading-re nil t)
+                              (match-beginning 0))))))
     (unless project-pos
       (setq project-pos (ticktick--create-project-heading project-title project-id)))
     (goto-char project-pos)
+    (when (eq ticktick-archived-project-behavior 'tag)
+      (save-excursion
+        (goto-char project-pos)
+        (org-toggle-tag ticktick--archived-tag
+                        (if (ticktick--project-archived-p project) 'on 'off))))
     (outline-show-subtree)
     (let ((tasks (ticktick--project-task-list project-id)))
       (if (not (eq ticktick-subheading-behavior 'subtask))
@@ -1337,7 +1380,12 @@ Also detects and handles tasks deleted from TickTick since last sync."
         (ticktick--ensure-todo-keywords)
         (org-with-wide-buffer
          (dolist (project all-projects)
-           (ticktick--sync-project project))
+           ;; Archived projects are only left out of the org file.  Their
+           ;; task ids stay in `current-api-ids' above, or archiving a list
+           ;; in TickTick would look exactly like deleting all its tasks.
+           (unless (and (eq ticktick-archived-project-behavior 'skip)
+                        (ticktick--project-archived-p project))
+             (ticktick--sync-project project)))
          (save-buffer)))
 
       ;; Update state with current API task IDs

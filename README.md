@@ -199,6 +199,19 @@ Org priorities are mapped to TickTick priorities.
 - `DONE` - Completed task
 - `CANCELLED` - Marked "won't do" in TickTick
 
+### Archived Lists
+
+A list archived in TickTick keeps syncing, with an `:archived:` tag on its
+project heading; un-archiving removes the tag again. To leave archived
+lists out of the file entirely:
+
+```elisp
+(setq ticktick-archived-project-behavior 'skip)
+```
+
+Either way their tasks are still tracked internally, so archiving a list
+never looks like its tasks were deleted.
+
 ### Subtasks
 
 By default a heading nested under a task is treated as part of that task's

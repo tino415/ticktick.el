@@ -527,5 +527,79 @@ Its parent may be completed, deleted, or past the filter's limit."
        (ticktick-push-from-org)
        (should (null created))))))
 
+;;; Archived lists
+
+(defmacro ticktick-test--with-archived-project (&rest body)
+  "Run BODY with the test project reported as archived."
+  `(cl-letf* ((real (symbol-function 'ticktick-request))
+              ((symbol-function 'ticktick-request)
+               (lambda (method endpoint &optional data)
+                 (let ((res (funcall real method endpoint data)))
+                   (if (equal endpoint "/open/v1/project")
+                       (mapcar (lambda (p) (plist-put (copy-sequence p) :closed t))
+                               res)
+                     res)))))
+     ,@body))
+
+(ert-deftest ticktick-test-json-false-is-not-archived ()
+  "JSON false parses to a truthy symbol, so it must be tested for."
+  (should-not (ticktick--project-archived-p '(:id "x" :closed :json-false)))
+  (should (ticktick--project-archived-p '(:id "x" :closed t)))
+  (should-not (ticktick--project-archived-p '(:id "x"))))
+
+(ert-deftest ticktick-test-archived-project-gets-tagged ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-archived-project-behavior 'tag))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org)))
+   (should (string-match-p "^\\* .*Ticktick\\.el.*:archived:"
+                           (ticktick-test--org-contents)))))
+
+(ert-deftest ticktick-test-unarchiving-removes-the-tag ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-archived-project-behavior 'tag))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+     (should (string-match-p ":archived:" (ticktick-test--org-contents)))
+     ;; now the server says it is open again
+     (ticktick-fetch-to-org)
+     (should-not (string-match-p ":archived:" (ticktick-test--org-contents))))))
+
+(ert-deftest ticktick-test-project-is-found-despite-a-tag ()
+  "Tagging the heading must not make the next sync create a second one."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-archived-project-behavior 'tag))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+     (ticktick-fetch-to-org))
+   (let ((headings 0))
+     (dolist (line (split-string (ticktick-test--org-contents) "\n"))
+       (when (string-match-p "^\\* .*Ticktick\\.el" line)
+         (setq headings (1+ headings))))
+     (should (= headings 1)))))
+
+(ert-deftest ticktick-test-skip-leaves-archived-project-out ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-archived-project-behavior 'skip))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org)))
+   (should-not (string-match-p (regexp-quote ticktick-test-active)
+                               (ticktick-test--org-contents)))))
+
+(ert-deftest ticktick-test-archiving-a-list-is-not-a-deletion ()
+  "Skipping a project must not make its tasks look deleted.
+Their ids have to stay in the snapshot even though nothing is written."
+  (ticktick-test--with-env
+   (ticktick-test--org-file (list ticktick-test-active))
+   (setq ticktick--sync-state
+         (plist-put ticktick--sync-state :api-task-ids
+                    (list ticktick-test-active)))
+   (setq ticktick-delete-behavior 'delete)
+   (let ((ticktick-archived-project-behavior 'skip))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org)))
+   (should (null ticktick-test--deleted-from-org))
+   (should (member ticktick-test-active
+                   (plist-get ticktick--sync-state :api-task-ids)))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

@@ -205,6 +205,65 @@ Org priorities are mapped to TickTick priorities.
 - `DONE` - Completed task
 - `CANCELLED` - Marked "won't do" in TickTick
 
+### Subtasks
+
+By default a heading nested under a task is treated as part of that task's
+description — the long-standing behaviour. TickTick shows the nested
+headings as text and no subtask is created.
+
+Set `ticktick-subheading-behavior` to `subtask` to make nesting real:
+
+```elisp
+(setq ticktick-subheading-behavior 'subtask)
+```
+
+Then a level-3 heading is a TickTick subtask of the level-2 task above it,
+nesting survives in both directions, and the child's text is no longer part
+of its parent's description:
+
+```org
+** TODO Plan trip
+:PROPERTIES:
+:TICKTICK_ID: abc123
+:END:
+notes that stay with the parent
+*** TODO Book flights
+:PROPERTIES:
+:TICKTICK_ID: def456
+:TICKTICK_PARENT_ID: abc123
+:END:
+```
+
+Two things to know before switching. Nested headings you already have will
+move out of their parent's descriptions and be created as real tasks on the
+next sync. And a subtask's parent is set when the task is created — moving a
+heading under a different parent afterwards is not yet sent to TickTick.
+
+A subtask whose parent is missing from TickTick's response — completed,
+deleted, or beyond the API's 200-task reply limit — is shown at the top
+level rather than hidden.
+
+### Checklists
+
+A TickTick checklist arrives as an org checkbox list under the task, ordered
+as TickTick orders it:
+
+```org
+** TODO Shopping
+:PROPERTIES:
+:TICKTICK_ID: abc123
+:TICKTICK_KIND: CHECKLIST
+:END:
+- [ ] bread
+- [X] milk
+```
+
+This is currently one-way: the items are shown, but ticking a box in Org
+does not tick it in TickTick. The list is not sent back as the task's
+description, and the items held by TickTick are left untouched, so nothing
+is lost by syncing a checklist — its items simply follow whatever TickTick
+says. Editing the rest of the task works as normal.
+
 ### Tags
 
 Tags are synchronized between TickTick and Org mode using Org's native tag syntax:

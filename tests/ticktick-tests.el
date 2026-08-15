@@ -314,5 +314,218 @@ cancelled task to TickTick as completed."
       (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
       (should (equal (cdr (assoc "status" (ticktick--heading-to-task))) 0))))))
 
+;;; Checklists
+
+(ert-deftest ticktick-test-checklist-items-become-checkboxes ()
+  "A CHECKLIST task's items reach Org as a checkbox list, in order."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      (should (equal (org-entry-get nil "TICKTICK_KIND") "CHECKLIST"))
+      (let ((body (buffer-substring-no-properties
+                   (point) (org-entry-end-position))))
+        ;; sortOrder, not the order the API happened to return them in
+        (should (string-match-p "- \\[ \\] Check 1\n- \\[ \\] Check 2\n- \\[X\\] Check completed"
+                                body)))))))
+
+(ert-deftest ticktick-test-checkboxes-are-not-sent-as-the-description ()
+  "The checkbox list renders the items; it is not the task's content.
+Sending it back as the description would duplicate every item as text."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should-not (string-match-p "Check 1" content))
+        (should-not (string-match-p "\\[X\\]" content)))))))
+
+(ert-deftest ticktick-test-plain-tasks-keep-checkbox-prose ()
+  "Only a checklist's own list is stripped, not checkboxes a user wrote."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** TODO plain\n:PROPERTIES:\n:TICKTICK_ID: plain-1\n:END:\n"
+             "notes\n- [ ] my own checkbox\n"))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org "plain-1"))
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should (string-match-p "my own checkbox" content)))))))
+
+(ert-deftest ticktick-test-task-without-items-gets-no-kind-property ()
+  "Ordinary tasks stay free of checklist bookkeeping."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
+      (should-not (org-entry-get nil "TICKTICK_KIND"))))))
+
+;;; Nested headings
+
+(defun ticktick-test--nested-file ()
+  "Write a task with a nested heading under it, and return to the task."
+  (with-temp-file ticktick-sync-file
+    (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+            ticktick-test-project-id "\n:END:\n"
+            "** TODO parent\n:PROPERTIES:\n:TICKTICK_ID: p-1\n"
+            ":TICKTICK_ETAG: e1\n:END:\n"
+            "parent body\n"
+            "*** TODO child\n:PROPERTIES:\n:TICKTICK_ID: c-1\n"
+            ":TICKTICK_ETAG: e2\n:END:\n"
+            "child body\n")))
+
+(defmacro ticktick-test--at-parent (&rest body)
+  `(with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org "p-1"))
+      ,@body)))
+
+(ert-deftest ticktick-test-fold-sends-nested-heading-as-content ()
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'fold))
+     (ticktick-test--at-parent
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should (string-match-p "parent body" content))
+        (should (string-match-p "child body" content)))))))
+
+(ert-deftest ticktick-test-subtask-keeps-nested-heading-out-of-content ()
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'subtask))
+     (ticktick-test--at-parent
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should (string-match-p "parent body" content))
+        (should-not (string-match-p "child body" content)))))))
+
+(ert-deftest ticktick-test-fold-notices-an-edit-to-a-nested-heading ()
+  "The whole point of #7: what is hashed must cover what is sent.
+Under `fold' a nested heading is part of the description, so editing it
+has to mark the task as needing a push."
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'fold))
+     (ticktick-test--at-parent
+      (ticktick--update-sync-meta)
+      (should-not (ticktick--should-sync-p))
+      ;; edit the child's body, leaving the parent's own text alone
+      (save-excursion
+        (goto-char (point-max))
+        (re-search-backward "^child body$")
+        (end-of-line)
+        (insert " changed"))
+      (should (ticktick--should-sync-p))))))
+
+(ert-deftest ticktick-test-fold-hash-ignores-a-nested-tasks-own-metadata ()
+  "A child's property drawer must not leak into the parent's digest."
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'fold))
+     (ticktick-test--at-parent
+      (let ((body (ticktick--subtree-body-for-hash)))
+        (should (string-match-p "child body" body))
+        (should-not (string-match-p "TICKTICK_ID" body))
+        (should-not (string-match-p "TICKTICK_ETAG" body))
+        (should-not (string-match-p ":PROPERTIES:" body)))))))
+
+;;; Subtasks
+
+(defun ticktick-test--level-of (id)
+  "Outline level of the heading carrying ID, or nil."
+  (with-current-buffer (find-file-noselect ticktick-sync-file)
+    (org-with-wide-buffer
+     (let ((pos (ticktick--find-task-by-id-in-org id)))
+       (when pos (goto-char pos) (org-current-level))))))
+
+(ert-deftest ticktick-test-fold-leaves-subtasks-flat ()
+  "The default must keep every task at level 2, as it always has."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-subheading-behavior 'fold))
+     (ticktick-fetch-to-org))
+   (should (= (ticktick-test--level-of ticktick-test-parent) 2))
+   (should (= (ticktick-test--level-of ticktick-test-sub-active) 2))))
+
+(ert-deftest ticktick-test-subtask-nests-a-child-under-its-parent ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-subheading-behavior 'subtask))
+     (ticktick-fetch-to-org))
+   (should (= (ticktick-test--level-of ticktick-test-parent) 2))
+   (should (= (ticktick-test--level-of ticktick-test-sub-active) 3))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-sub-active))
+      ;; the link back is recorded, and the parent really is the parent
+      (should (equal (org-entry-get nil "TICKTICK_PARENT_ID")
+                     ticktick-test-parent))
+      (org-up-heading-safe)
+      (should (equal (org-entry-get nil "TICKTICK_ID") ticktick-test-parent))))))
+
+(ert-deftest ticktick-test-subtask-orphan-stays-at-top-level ()
+  "A child whose parent is not in the listing must still appear.
+Its parent may be completed, deleted, or past the filter's limit."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-subheading-behavior 'subtask)
+         (ticktick-import-completed-tasks t))
+     (cl-letf* ((real (symbol-function 'ticktick--project-task-list))
+                ((symbol-function 'ticktick--project-task-list)
+                 (lambda (pid)
+                   ;; drop the parent, keep the child pointing at it
+                   (cl-remove-if (lambda (tk)
+                                   (equal (plist-get tk :id) ticktick-test-parent))
+                                 (funcall real pid)))))
+       (ticktick-fetch-to-org)))
+   (should (= (ticktick-test--level-of ticktick-test-sub-active) 2))))
+
+(ert-deftest ticktick-test-subtask-mode-pushes-a-nested-heading-as-a-task ()
+  "Under `subtask' a level-3 heading is pushed, carrying its parent's id."
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'subtask)
+         (created nil))
+     (cl-letf (((symbol-function 'ticktick--create-task)
+                (lambda (task project-id &optional parent-id)
+                  (push (list (cdr (assoc "title" task)) project-id parent-id)
+                        created)))
+               ((symbol-function 'ticktick--update-task)
+                (lambda (&rest _) nil)))
+       ;; the child has no TICKTICK_ID of its own yet
+       (with-current-buffer (find-file-noselect ticktick-sync-file)
+         (org-with-wide-buffer
+          (goto-char (ticktick--find-task-by-id-in-org "c-1"))
+          (org-entry-delete nil "TICKTICK_ID")
+          (save-buffer)))
+       (ticktick-push-from-org)
+       (should (equal created (list (list "child" ticktick-test-project-id "p-1"))))))))
+
+(ert-deftest ticktick-test-fold-mode-does-not-push-nested-headings ()
+  "Under `fold' a nested heading is description text, not a task."
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'fold)
+         (created nil))
+     (cl-letf (((symbol-function 'ticktick--create-task)
+                (lambda (task &rest _)
+                  (push (cdr (assoc "title" task)) created)))
+               ((symbol-function 'ticktick--update-task)
+                (lambda (&rest _) nil)))
+       (with-current-buffer (find-file-noselect ticktick-sync-file)
+         (org-with-wide-buffer
+          (goto-char (ticktick--find-task-by-id-in-org "c-1"))
+          (org-entry-delete nil "TICKTICK_ID")
+          (save-buffer)))
+       (ticktick-push-from-org)
+       (should (null created))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

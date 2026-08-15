@@ -97,6 +97,7 @@
 ;; - `ticktick-sync-interval': Enable automatic syncing every N minutes
 ;; - `ticktick-httpd-port': Port for OAuth callback server
 ;; - `ticktick-import-completed-tasks': Pull already-completed tasks into Org
+;; - `ticktick-subheading-behavior': Nested heading as description or subtask
 ;; - `ticktick-wont-do-keyword': Org keyword for tasks marked "won't do"
 ;; - `ticktick-delete-behavior': How to handle deletions (ask/archive/delete/sync-only)
 ;; - `ticktick-archive-location': Where to archive deleted tasks (separate-file/archive-heading)
@@ -191,6 +192,20 @@ After changing this value, call `ticktick-toggle-sync-timer' to apply changes."
                  (const :tag "Archive instead of delete" archive)
                  (const :tag "Delete without confirmation" delete)
                  (const :tag "Never delete (sync only)" sync-only))
+  :group 'ticktick)
+
+(defcustom ticktick-subheading-behavior 'fold
+  "What a heading nested under a task means.
+- `fold': the nested heading and its text are part of the task's
+  description, which is how this package has always behaved.  TickTick
+  shows them as text; no nested task is created.
+- `subtask': the nested heading is its own TickTick task, linked to the
+  one above it, and no longer part of that task's description.
+
+Switching to `subtask' moves any nested headings you already have out of
+their parent's description and creates them as tasks on the next sync."
+  :type '(choice (const :tag "Part of the description" fold)
+                 (const :tag "A subtask of its own" subtask))
   :group 'ticktick)
 
 (defcustom ticktick-wont-do-keyword "CANCELLED"
@@ -384,7 +399,7 @@ Returns a list of task IDs."
       (org-with-wide-buffer
        (goto-char (point-min))
        (while (outline-next-heading)
-         (when (= (org-current-level) 2)
+         (when (ticktick--task-heading-p)
            (let ((task-id (org-entry-get nil "TICKTICK_ID"))
                  (project-id (org-entry-get nil "TICKTICK_PROJECT_ID" t)))
              (when (and task-id (not (string-empty-p task-id))
@@ -909,8 +924,45 @@ DATA is the optional request body data."
 
 ;;; Org conversion helpers -----------------------------------------------------
 
-(defun ticktick--task-to-heading (task)
+(defconst ticktick--checkbox-line-re "^[ \t]*- \\[[ Xx-]\\] "
+  "Regexp matching one line of a checklist rendered as org checkboxes.")
+
+(defun ticktick--strip-checkboxes-if-checklist (kind body)
+  "Return BODY without its checkbox lines when KIND is \"CHECKLIST\".
+The checkbox list is a rendering of the task's items, not part of its
+description, and sending it as the description would leave the text
+duplicated in TickTick.  Items themselves are left untouched: the update
+endpoint merges, so omitting them preserves what the server holds."
+  (if (not (equal kind "CHECKLIST"))
+      body
+    (string-trim
+     (mapconcat #'identity
+                (cl-remove-if (lambda (line)
+                                (string-match-p ticktick--checkbox-line-re line))
+                              (split-string body "\n"))
+                "\n"))))
+
+(defun ticktick--items-to-checkboxes (items)
+  "Render checklist ITEMS as an org checkbox list, or nil if there are none.
+ITEMS arrive in an arbitrary order, so they are sorted by `sortOrder' to
+match how TickTick shows them.  An item counts as done when its status is
+anything other than 0, the same convention tasks use."
+  (when (and items (> (length items) 0))
+    (let ((sorted (sort (copy-sequence items)
+                        (lambda (a b)
+                          (< (or (plist-get a :sortOrder) 0)
+                             (or (plist-get b :sortOrder) 0))))))
+      (mapconcat
+       (lambda (item)
+         (format "- [%s] %s"
+                 (if (eql (plist-get item :status) 0) " " "X")
+                 (or (plist-get item :title) "")))
+       sorted "\n"))))
+
+(defun ticktick--task-to-heading (task &optional level)
   "Convert TASK plist to an org heading string.
+LEVEL is the org outline level to emit, defaulting to 2; a subtask sits
+one level below the task it belongs to.
 Content lines starting with \"*\" or \"#+\" are escaped so they are not
 read back as Org syntax."
   (let ((id (plist-get task :id))
@@ -920,11 +972,14 @@ read back as Org syntax."
         (due (plist-get task :dueDate))
         (etag (plist-get task :etag))
         (content (plist-get task :content))
-        (tags (plist-get task :tags)))
+        (tags (plist-get task :tags))
+        (kind (plist-get task :kind))
+        (items (plist-get task :items)))
     (string-join
      (delq nil
            (list
-            (format "** %s%s %s%s"
+            (format "%s %s%s %s%s"
+                    (make-string (or level 2) ?*)
                     (pcase status
                       (2 "DONE")
                       (-1 ticktick-wont-do-keyword)
@@ -939,13 +994,20 @@ read back as Org syntax."
             ":PROPERTIES:"
             (format ":TICKTICK_ID: %s" id)
             (format ":TICKTICK_ETAG: %s" (or etag ""))
+            ;; Recorded so that reading the heading back knows a checkbox
+            ;; list is the task's items rather than part of its description.
+            (when (and kind (not (equal kind "TEXT")))
+              (format ":TICKTICK_KIND: %s" kind))
+            (when (plist-get task :parentId)
+              (format ":TICKTICK_PARENT_ID: %s" (plist-get task :parentId)))
             ":END:"
             ;; An empty body must drop out entirely: keeping it would make
             ;; `string-join' end the heading with a newline for some tasks
             ;; and not others, which callers then cannot append to safely.
             (let ((body (and content (string-trim content))))
               (unless (or (null body) (string-empty-p body))
-                (org-escape-code-in-string body)))))
+                (org-escape-code-in-string body)))
+            (ticktick--items-to-checkboxes items)))
      "\n")))
 
 (defun ticktick--heading-to-task ()
@@ -962,10 +1024,14 @@ Org escaping is removed from the content."
          (deadline (org-element-property :deadline el))
          (tags (org-element-property :tags el))
          (id (org-entry-get nil "TICKTICK_ID"))
+         (kind (org-entry-get nil "TICKTICK_KIND"))
          (content
           (save-excursion
             (save-restriction
-              (org-narrow-to-subtree)
+              ;; The same region the hash covers, so a change that gets
+              ;; sent is always a change that was detected.
+              (narrow-to-region (org-entry-beginning-position)
+                                (ticktick--content-end-position))
               (goto-char (point-min))
               (forward-line)
               (while (looking-at org-planning-line-re)
@@ -973,9 +1039,11 @@ Org escaping is removed from the content."
               (when (looking-at ":PROPERTIES:")
                 (re-search-forward "^:END:" nil t)
                 (forward-line))
-              (org-unescape-code-in-string
-               (string-trim
-                (buffer-substring-no-properties (point) (point-max))))))))
+              (ticktick--strip-checkboxes-if-checklist
+               kind
+               (org-unescape-code-in-string
+                (string-trim
+                 (buffer-substring-no-properties (point) (point-max)))))))))
     `(("id" . ,id)
       ("title" . ,title)
       ("status" . ,(cond
@@ -989,10 +1057,45 @@ Org escaping is removed from the content."
       ("tags" . ,(when tags (vconcat tags)))
       ("content" . ,content))))
 
+(defun ticktick--task-heading-p ()
+  "Return non-nil if point is on a heading this package treats as a task.
+Level-1 headings are projects.  Anything deeper than level 2 is a task
+only under `subtask'; under `fold' it is part of its parent's
+description."
+  (let ((level (org-current-level)))
+    (and level
+         (>= level 2)
+         (or (= level 2) (eq ticktick-subheading-behavior 'subtask))
+         (not (org-entry-get nil "TICKTICK_PROJECT_ID")))))
+
+(defun ticktick--parent-task-id ()
+  "Return the TickTick id of the task this heading sits under, if any."
+  (when (eq ticktick-subheading-behavior 'subtask)
+    (save-excursion
+      (when (and (> (or (org-current-level) 0) 2)
+                 (org-up-heading-safe))
+        (let ((id (org-entry-get nil "TICKTICK_ID")))
+          (unless (or (null id) (string-empty-p id)) id))))))
+
+(defun ticktick--content-end-position ()
+  "Return where the current task's content ends.
+Under `fold' that is the end of the whole subtree, since nested headings
+are part of the description; under `subtask' it is the start of the first
+nested heading, since those are tasks of their own.
+
+Change detection and the content that gets sent must agree on this, or
+the region deciding *whether* to push differs from the region deciding
+*what* is pushed -- which is how edits to a nested heading used to be
+skipped silently."
+  (if (eq ticktick-subheading-behavior 'subtask)
+      (org-entry-end-position)
+    (save-excursion (org-end-of-subtree t t) (point))))
+
 (defun ticktick--subtree-body-for-hash ()
   "Return a stable string of the current subtree, with volatile props removed."
   (let* ((raw (buffer-substring-no-properties
-               (org-entry-beginning-position) (org-entry-end-position))))
+               (org-entry-beginning-position)
+               (ticktick--content-end-position))))
     (with-temp-buffer
       (insert raw)
       (goto-char (point-min))
@@ -1046,11 +1149,16 @@ if the buffer already knows `ticktick-wont-do-keyword'."
      (insert (format "#+TODO: TODO | DONE %s\n" ticktick-wont-do-keyword)))
     (org-mode-restart)))
 
-(defun ticktick--sync-task (task project-pos)
-  "Sync a single TASK under PROJECT-POS, updating or creating as needed."
+(defun ticktick--sync-task (task project-pos &optional under-pos level)
+  "Sync a single TASK under PROJECT-POS, updating or creating as needed.
+A new heading is placed just inside UNDER-POS, which defaults to
+PROJECT-POS, and emitted at LEVEL, which defaults to 2.  Subtasks pass
+their parent's position and one level deeper."
   (let* ((id (plist-get task :id))
          (etag (plist-get task :etag))
          (status (plist-get task :status))
+         (under-pos (or under-pos project-pos))
+         (level (or level 2))
          (existing-pos (ticktick--find-task-under-project project-pos id)))
     (cond
      ;; Tasks that are already closed -- completed or "won't do" -- are not
@@ -1063,24 +1171,27 @@ if the buffer already knows `ticktick-wont-do-keyword'."
      (existing-pos
       (save-excursion
         (goto-char existing-pos)
-        (let ((existing-etag (org-entry-get nil "TICKTICK_ETAG")))
+        (let ((existing-etag (org-entry-get nil "TICKTICK_ETAG"))
+              ;; Read before the deletion below, which takes the heading
+              ;; with it: rewriting must not change the entry's depth.
+              (existing-level (org-current-level)))
           (unless (string= existing-etag etag)
             (delete-region (org-entry-beginning-position)
                            (org-entry-end-position))
             ;; The deleted region ran up to the next heading and so took
             ;; the entry's final newline with it; without one the next
             ;; heading would be glued onto this task's body.
-            (insert (ticktick--task-to-heading task) "\n")
+            (insert (ticktick--task-to-heading task existing-level) "\n")
             ;; Inserting leaves point on that next heading, so step back
             ;; before stamping the sync metadata.
             (goto-char existing-pos)
             (ticktick--update-sync-meta)))))
      (t
       (save-excursion
-        (goto-char project-pos)
+        (goto-char under-pos)
         (outline-next-heading)
         (let ((start (point)))
-          (insert (ticktick--task-to-heading task) "\n")
+          (insert (ticktick--task-to-heading task level) "\n")
           ;; Inserting leaves point on the following heading, so come back
           ;; before stamping, or the metadata lands on someone else.
           (goto-char start)
@@ -1100,11 +1211,12 @@ reaches the org file."
         (org-with-wide-buffer
          (goto-char pos)
          (let ((existing-etag (org-entry-get nil "TICKTICK_ETAG"))
+               (existing-level (org-current-level))
                (etag (plist-get task :etag)))
            (unless (equal existing-etag etag)
              (delete-region (org-entry-beginning-position)
                             (org-entry-end-position))
-             (insert (ticktick--task-to-heading task) "\n")
+             (insert (ticktick--task-to-heading task existing-level) "\n")
              ;; Inserting leaves point on the *next* heading, so step back
              ;; before stamping the sync metadata.
              (goto-char pos)
@@ -1124,8 +1236,47 @@ reaches the org file."
       (setq project-pos (ticktick--create-project-heading project-title project-id)))
     (goto-char project-pos)
     (outline-show-subtree)
-    (dolist (task (ticktick--project-task-list project-id))
-      (ticktick--sync-task task project-pos))))
+    (let ((tasks (ticktick--project-task-list project-id)))
+      (if (not (eq ticktick-subheading-behavior 'subtask))
+          (dolist (task tasks)
+            (ticktick--sync-task task project-pos))
+        (ticktick--sync-task-forest tasks project-pos)))))
+
+(defun ticktick--children-by-parent (tasks)
+  "Group TASKS by their `parentId', returning a hash table."
+  (let ((by-parent (make-hash-table :test #'equal)))
+    (dolist (task tasks)
+      (let ((parent (plist-get task :parentId)))
+        (when parent
+          (puthash parent (append (gethash parent by-parent) (list task))
+                   by-parent))))
+    by-parent))
+
+(defun ticktick--sync-task-forest (tasks project-pos)
+  "Sync TASKS under PROJECT-POS, nesting each one below its parent.
+A task whose parent is not among TASKS is treated as a root: the parent
+may be completed, deleted, or simply beyond the listing's limit, and
+hiding the child in that case would be worse than showing it flat."
+  (let* ((by-parent (ticktick--children-by-parent tasks))
+         (known (make-hash-table :test #'equal)))
+    (dolist (task tasks)
+      (puthash (plist-get task :id) t known))
+    (letrec ((emit
+              (lambda (task under-pos level)
+                (ticktick--sync-task task project-pos under-pos level)
+                (let ((children (gethash (plist-get task :id) by-parent)))
+                  (when children
+                    ;; Re-find the parent: syncing may have rewritten it,
+                    ;; and children are placed relative to where it now is.
+                    (let ((pos (ticktick--find-task-under-project
+                                project-pos (plist-get task :id))))
+                      (when pos
+                        (dolist (child children)
+                          (funcall emit child pos (1+ level))))))))))
+      (dolist (task tasks)
+        (let ((parent (plist-get task :parentId)))
+          (unless (and parent (gethash parent known))
+            (funcall emit task project-pos 2)))))))
 
 (defun ticktick--update-task (task project-id id)
   "Update existing task with TASK data, PROJECT-ID, and ID."
@@ -1134,10 +1285,16 @@ reaches the org file."
   (ticktick--update-sync-meta)
   (message "Updated: %s" (alist-get "title" task)))
 
-(defun ticktick--create-task (task project-id)
-  "Create new task with TASK data and PROJECT-ID."
+(defun ticktick--create-task (task project-id &optional parent-id)
+  "Create new task with TASK data and PROJECT-ID.
+PARENT-ID, when given, makes the new task a subtask of that one.  It is
+only set at creation: changing an existing task's parent through this
+endpoint has not been verified to work."
   (let ((resp (ticktick-request "POST" "/open/v1/task"
-                                (append task `(("projectId" . ,project-id))))))
+                                (append task
+                                        `(("projectId" . ,project-id))
+                                        (when parent-id
+                                          `(("parentId" . ,parent-id)))))))
     (when resp
       (org-set-property "TICKTICK_ID" (plist-get resp :id))
       (org-set-property "TICKTICK_ETAG" (plist-get resp :etag))
@@ -1217,15 +1374,15 @@ Also detects and handles tasks deleted from Org since last sync."
     (org-with-wide-buffer
      (goto-char (point-min))
      (while (outline-next-heading)
-       (when (and (= (org-current-level) 2)
-                  (not (org-entry-get nil "TICKTICK_PROJECT_ID")))
+       (when (ticktick--task-heading-p)
          (when (ticktick--should-sync-p)
            (let* ((task (ticktick--heading-to-task))
                   (project-id (org-entry-get nil "TICKTICK_PROJECT_ID" t))
                   (id (org-entry-get nil "TICKTICK_ID")))
              (if (and id (not (string-empty-p id)))
                  (ticktick--update-task task project-id id)
-               (ticktick--create-task task project-id))))))
+               (ticktick--create-task task project-id
+                                      (ticktick--parent-task-id)))))))
      (save-buffer)))
 
   ;; Update state with current Org task IDs and project map

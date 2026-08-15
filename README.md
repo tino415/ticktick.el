@@ -204,6 +204,86 @@ Org priorities are mapped to TickTick priorities.
 - `TODO` - Open task
 - `DONE` - Completed task
 - `CANCELLED` - Marked "won't do" in TickTick
+- no keyword - A note rather than a task
+
+### Notes
+
+TickTick notes are not tasks, so they arrive as plain headings with no
+`TODO` keyword:
+
+```org
+** Ideas for the talk
+:PROPERTIES:
+:TICKTICK_ID: abc123
+:TICKTICK_KIND: NOTE
+:END:
+```
+
+This works the other way too — a heading you write without a keyword is
+pushed to TickTick as a note rather than an open task.
+
+### Descriptions
+
+TickTick descriptions are markdown, so they are kept in a source block
+rather than as bare Org text — otherwise markdown lists, headings and
+emphasis would be read as Org syntax:
+
+```org
+** TODO Write the report
+:PROPERTIES:
+:TICKTICK_ID: abc123
+:END:
+#+begin_src markdown
+- outline first
+- **then** the detail
+#+end_src
+```
+
+Set `ticktick-content-as-src-block` to `nil` for bare text instead.
+Descriptions written before this existed are still read back either way,
+and gain the block the next time the task changes. Switching the option
+does not by itself make tasks look edited.
+
+### Folders
+
+By default every list is a top-level heading, regardless of the folder it
+sits in in TickTick. To mirror the folders:
+
+```elisp
+(setq ticktick-group-projects-in-folders t)
+```
+
+The folder becomes the top-level heading, its lists sit one level below,
+and their tasks one level below that:
+
+```org
+* Work
+:PROPERTIES:
+:TICKTICK_GROUP_ID: grp123
+:END:
+** Client project
+:PROPERTIES:
+:TICKTICK_PROJECT_ID: prj456
+:END:
+*** TODO Send the invoice
+```
+
+Turning this on rearranges the file — lists already in it are moved under
+their folder, tasks and all. Lists in no folder, including the Inbox, stay
+where they are.
+
+### Archived Lists
+
+A list archived in TickTick keeps syncing, with an `:archived:` tag on its
+project heading; un-archiving removes the tag again. To leave archived
+lists out of the file entirely:
+
+```elisp
+(setq ticktick-archived-project-behavior 'skip)
+```
+
+Either way their tasks are still tracked internally, so archiving a list
+never looks like its tasks were deleted.
 
 ### Subtasks
 

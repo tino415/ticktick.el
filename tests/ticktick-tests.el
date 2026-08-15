@@ -527,5 +527,323 @@ Its parent may be completed, deleted, or past the filter's limit."
        (ticktick-push-from-org)
        (should (null created))))))
 
+;;; Archived lists
+
+(defmacro ticktick-test--with-archived-project (&rest body)
+  "Run BODY with the test project reported as archived."
+  `(cl-letf* ((real (symbol-function 'ticktick-request))
+              ((symbol-function 'ticktick-request)
+               (lambda (method endpoint &optional data)
+                 (let ((res (funcall real method endpoint data)))
+                   (if (equal endpoint "/open/v1/project")
+                       (mapcar (lambda (p) (plist-put (copy-sequence p) :closed t))
+                               res)
+                     res)))))
+     ,@body))
+
+(ert-deftest ticktick-test-json-false-is-not-archived ()
+  "JSON false parses to a truthy symbol, so it must be tested for."
+  (should-not (ticktick--project-archived-p '(:id "x" :closed :json-false)))
+  (should (ticktick--project-archived-p '(:id "x" :closed t)))
+  (should-not (ticktick--project-archived-p '(:id "x"))))
+
+(ert-deftest ticktick-test-archived-project-gets-tagged ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-archived-project-behavior 'tag))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org)))
+   (should (string-match-p "^\\* .*Ticktick\\.el.*:archived:"
+                           (ticktick-test--org-contents)))))
+
+(ert-deftest ticktick-test-unarchiving-removes-the-tag ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-archived-project-behavior 'tag))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+     (should (string-match-p ":archived:" (ticktick-test--org-contents)))
+     ;; now the server says it is open again
+     (ticktick-fetch-to-org)
+     (should-not (string-match-p ":archived:" (ticktick-test--org-contents))))))
+
+(ert-deftest ticktick-test-project-is-found-despite-a-tag ()
+  "Tagging the heading must not make the next sync create a second one."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-archived-project-behavior 'tag))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+     (ticktick-fetch-to-org))
+   (let ((headings 0))
+     (dolist (line (split-string (ticktick-test--org-contents) "\n"))
+       (when (string-match-p "^\\* .*Ticktick\\.el" line)
+         (setq headings (1+ headings))))
+     (should (= headings 1)))))
+
+(ert-deftest ticktick-test-skip-leaves-archived-project-out ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-archived-project-behavior 'skip))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org)))
+   (should-not (string-match-p (regexp-quote ticktick-test-active)
+                               (ticktick-test--org-contents)))))
+
+(ert-deftest ticktick-test-archiving-a-list-is-not-a-deletion ()
+  "Skipping a project must not make its tasks look deleted.
+Their ids have to stay in the snapshot even though nothing is written."
+  (ticktick-test--with-env
+   (ticktick-test--org-file (list ticktick-test-active))
+   (setq ticktick--sync-state
+         (plist-put ticktick--sync-state :api-task-ids
+                    (list ticktick-test-active)))
+   (setq ticktick-delete-behavior 'delete)
+   (let ((ticktick-archived-project-behavior 'skip))
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org)))
+   (should (null ticktick-test--deleted-from-org))
+   (should (member ticktick-test-active
+                   (plist-get ticktick--sync-state :api-task-ids)))))
+
+;;; Descriptions as markdown blocks
+
+(ert-deftest ticktick-test-description-is-wrapped-in-a-src-block ()
+  "The note fixture's body is markdown bullets, which Org would eat."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-note))
+      (let ((body (buffer-substring-no-properties
+                   (point) (org-entry-end-position))))
+        (should (string-match-p "#\\+begin_src markdown" body))
+        (should (string-match-p "#\\+end_src" body))
+        ;; still escaped inside the block, so the bullets stay text
+        (should (string-match-p "^,\\* link one" body)))))))
+
+(ert-deftest ticktick-test-wrapped-description-round-trips ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-note))
+      (let ((content (cdr (assoc "content" (ticktick--heading-to-task)))))
+        (should (equal content "* link one\n* link two \n* link three")))))))
+
+(ert-deftest ticktick-test-bare-description-still-reads-back ()
+  "Files written before wrapping must keep working."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** TODO old\n:PROPERTIES:\n:TICKTICK_ID: old-1\n:END:\n"
+             "just some text\n"))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org "old-1"))
+      (should (equal (cdr (assoc "content" (ticktick--heading-to-task)))
+                     "just some text"))))))
+
+(ert-deftest ticktick-test-end-src-in-a-description-cannot-break-out ()
+  (ticktick-test--with-env
+   (let ((heading (ticktick--task-to-heading
+                   '(:id "x" :title "T" :status 0 :priority 0 :etag "e"
+                         :content "before\n#+end_src\nafter"))))
+     ;; exactly one unescaped terminator: the block's own
+     (let ((terminators 0)
+           (start 0))
+       (while (string-match "^#\\+end_src$" heading start)
+         (setq terminators (1+ terminators)
+               start (match-end 0)))
+       (should (= terminators 1)))
+     ;; the one in the description was commented out instead
+     (should (string-match-p "^,#\\+end_src$" heading))
+     ;; and it survives the trip back
+     (should (equal (ticktick--unwrap-content
+                     (ticktick--wrap-content
+                      (org-escape-code-in-string "before\n#+end_src\nafter")))
+                    (org-escape-code-in-string "before\n#+end_src\nafter"))))))
+
+(ert-deftest ticktick-test-wrapping-does-not-change-the-digest ()
+  "Gaining the block must not make a task look edited."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** TODO t\n:PROPERTIES:\n:TICKTICK_ID: t-1\n:END:\n"
+             "some text\n"))
+   (let (bare wrapped)
+     (with-current-buffer (find-file-noselect ticktick-sync-file)
+       (org-with-wide-buffer
+        (goto-char (ticktick--find-task-by-id-in-org "t-1"))
+        (setq bare (ticktick--subtree-body-for-hash))))
+     (with-temp-file ticktick-sync-file
+       (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+               ticktick-test-project-id "\n:END:\n"
+               "** TODO t\n:PROPERTIES:\n:TICKTICK_ID: t-1\n:END:\n"
+               "#+begin_src markdown\nsome text\n#+end_src\n"))
+     (with-current-buffer (find-file-noselect ticktick-sync-file)
+       (revert-buffer t t t)
+       (org-with-wide-buffer
+        (goto-char (ticktick--find-task-by-id-in-org "t-1"))
+        (setq wrapped (ticktick--subtree-body-for-hash))))
+     (should (equal bare wrapped)))))
+
+;;; Notes
+
+(ert-deftest ticktick-test-note-has-no-todo-keyword ()
+  "A note is not something to be done."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-note))
+      (should (equal (org-entry-get nil "TICKTICK_KIND") "NOTE"))
+      (should-not (org-get-todo-state))
+      ;; the title is the whole heading, not preceded by a keyword
+      (should (equal (org-get-heading t t t t) "Note containing"))))))
+
+(ert-deftest ticktick-test-ordinary-tasks-still-have-a-keyword ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
+      (should (equal (org-get-todo-state) "TODO"))))))
+
+(ert-deftest ticktick-test-note-does-not-become-a-task-on-push ()
+  "Pushing a note back must keep it a note."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-note))
+      (should (equal (cdr (assoc "kind" (ticktick--heading-to-task))) "NOTE"))))))
+
+(ert-deftest ticktick-test-a-keywordless-heading-is-pushed-as-a-note ()
+  "Writing a plain heading in Org is how a note is created."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** just a thought\n:PROPERTIES:\n:TICKTICK_ID: n-1\n:END:\n"))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org "n-1"))
+      (let ((task (ticktick--heading-to-task)))
+        (should (equal (cdr (assoc "kind" task)) "NOTE"))
+        (should (equal (cdr (assoc "title" task)) "just a thought")))))))
+
+(ert-deftest ticktick-test-checklist-stays-a-checklist-when-pushed ()
+  "The note rule must not reclassify a checklist."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      (should (equal (cdr (assoc "kind" (ticktick--heading-to-task)))
+                     "CHECKLIST"))))))
+
+(ert-deftest ticktick-test-notes-are-picked-up-for-pushing ()
+  "Candidates are chosen by level and property, not by keyword."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+             ticktick-test-project-id "\n:END:\n"
+             "** a note with no keyword\n:PROPERTIES:\n:TICKTICK_ID: n-2\n:END:\n"))
+   (let (pushed)
+     (cl-letf (((symbol-function 'ticktick--update-task)
+                (lambda (task &rest _) (push (cdr (assoc "kind" task)) pushed)))
+               ((symbol-function 'ticktick--create-task)
+                (lambda (&rest _) nil)))
+       (ticktick-push-from-org)
+       (should (equal pushed '("NOTE")))))))
+
+;;; Folders
+
+(defun ticktick-test--heading-levels ()
+  "Alist of (HEADING-TEXT . LEVEL) for the whole sync file."
+  (with-current-buffer (find-file-noselect ticktick-sync-file)
+    (org-with-wide-buffer
+     (let (out)
+       (goto-char (point-min))
+       (while (outline-next-heading)
+         (push (cons (org-get-heading t t t t) (org-current-level)) out))
+       (nreverse out)))))
+
+(ert-deftest ticktick-test-folders-off-keeps-lists-at-top-level ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders nil))
+     (ticktick-fetch-to-org))
+   (let ((levels (ticktick-test--heading-levels)))
+     (should (equal (cdr (assoc "🏗Ticktick.el" levels)) 1))
+     (should (equal (cdr (assoc "Test task active" levels)) 2))
+     (should-not (assoc "Other" levels)))))
+
+(ert-deftest ticktick-test-folders-on-nests-list-and-tasks ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org))
+   (let ((levels (ticktick-test--heading-levels)))
+     (should (equal (cdr (assoc "Other" levels)) 1))
+     (should (equal (cdr (assoc "🏗Ticktick.el" levels)) 2))
+     (should (equal (cdr (assoc "Test task active" levels)) 3)))))
+
+(ert-deftest ticktick-test-ungrouped-list-stays-at-top-level ()
+  "The inbox belongs to no folder, so it must not be moved."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org))
+   (should (equal (cdr (assoc "Inbox" (ticktick-test--heading-levels))) 1))))
+
+(ert-deftest ticktick-test-existing-list-is-moved-under-its-folder ()
+  "Turning grouping on rearranges a file that was already flat."
+  (ticktick-test--with-env
+   (ticktick-test--org-file (list ticktick-test-active))
+   (let ((ticktick-group-projects-in-folders nil))
+     (ticktick-fetch-to-org))
+   (should (equal (cdr (assoc "🏗Ticktick.el" (ticktick-test--heading-levels))) 1))
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org))
+   (let ((levels (ticktick-test--heading-levels)))
+     (should (equal (cdr (assoc "🏗Ticktick.el" levels)) 2))
+     ;; the tasks came with it rather than being left behind
+     (should (equal (cdr (assoc "Test task active" levels)) 3)))))
+
+(ert-deftest ticktick-test-grouping-does-not-duplicate-on-resync ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org)
+     (ticktick-fetch-to-org))
+   (let ((folders 0) (lists 0))
+     (dolist (h (ticktick-test--heading-levels))
+       (when (equal (car h) "Other") (setq folders (1+ folders)))
+       (when (equal (car h) "🏗Ticktick.el") (setq lists (1+ lists))))
+     (should (= folders 1))
+     (should (= lists 1)))))
+
+(ert-deftest ticktick-test-nested-tasks-are-still-pushed-when-grouped ()
+  "A task one level deeper must still be recognised as a task."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
+      (should (= (org-current-level) 3))
+      (should (ticktick--task-heading-p))
+      ;; and neither the folder nor the list counts as one
+      (goto-char (ticktick--find-project-heading ticktick-test-project-id))
+      (should-not (ticktick--task-heading-p))
+      (org-up-heading-safe)
+      (should-not (ticktick--task-heading-p))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

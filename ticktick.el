@@ -98,6 +98,9 @@
 ;; - `ticktick-httpd-port': Port for OAuth callback server
 ;; - `ticktick-import-completed-tasks': Pull already-completed tasks into Org
 ;; - `ticktick-subheading-behavior': Nested heading as description or subtask
+;; - `ticktick-archived-project-behavior': Tag or skip archived lists
+;; - `ticktick-content-as-src-block': Keep descriptions in a markdown block
+;; - `ticktick-group-projects-in-folders': Nest lists under their folder
 ;; - `ticktick-wont-do-keyword': Org keyword for tasks marked "won't do"
 ;; - `ticktick-delete-behavior': How to handle deletions (ask/archive/delete/sync-only)
 ;; - `ticktick-archive-location': Where to archive deleted tasks (separate-file/archive-heading)
@@ -192,6 +195,42 @@ After changing this value, call `ticktick-toggle-sync-timer' to apply changes."
                  (const :tag "Archive instead of delete" archive)
                  (const :tag "Delete without confirmation" delete)
                  (const :tag "Never delete (sync only)" sync-only))
+  :group 'ticktick)
+
+(defcustom ticktick-group-projects-in-folders nil
+  "Whether to nest lists under the folder they belong to in TickTick.
+When nil every list is a top-level heading, which is how this package
+has always laid the file out.  When non-nil, a folder becomes a
+top-level heading and the lists inside it sit one level below, with
+their tasks one level below that.
+
+Turning this on rearranges the sync file: a list that belongs to a
+folder is moved underneath it.  Lists in no folder stay where they are."
+  :type 'boolean
+  :group 'ticktick)
+
+(defcustom ticktick-content-as-src-block t
+  "Whether to keep a task's description in a markdown source block.
+TickTick descriptions are markdown, and Org would otherwise read their
+lists, headings and emphasis as its own syntax.  A block also makes the
+escaping of lines starting with `*' or `#+' invisible, which in ordinary
+body text shows up as a literal leading comma.
+
+Descriptions written before this was switched on are still read back
+correctly; they gain the block the next time the task changes."
+  :type 'boolean
+  :group 'ticktick)
+
+(defcustom ticktick-archived-project-behavior 'tag
+  "What to do with lists that have been archived in TickTick.
+- `tag': keep syncing them, with an :archived: tag on the project
+  heading.  Un-archiving a list removes the tag again.
+- `skip': leave them out of the org file.
+
+Either way their tasks stay accounted for internally, so archiving a
+list in TickTick never looks like its tasks were deleted."
+  :type '(choice (const :tag "Tag the project heading" tag)
+                 (const :tag "Leave them out" skip))
   :group 'ticktick)
 
 (defcustom ticktick-subheading-behavior 'fold
@@ -348,6 +387,16 @@ This is a plist with keys:
            (when (and id (not (string-empty-p id)))
              (push id task-ids))))))
     (nreverse task-ids)))
+
+(defconst ticktick--archived-tag "archived"
+  "Org tag put on the heading of a list archived in TickTick.")
+
+(defun ticktick--project-archived-p (project)
+  "Return non-nil if PROJECT has been archived in TickTick.
+Only a real boolean true counts: JSON false parses to `:json-false',
+which is itself truthy, so testing the field directly would report every
+project as archived."
+  (eq (plist-get project :closed) t))
 
 (defun ticktick--project-task-list (project-id)
   "Return every task TickTick will tell us about for PROJECT-ID.
@@ -927,6 +976,26 @@ DATA is the optional request body data."
 (defconst ticktick--checkbox-line-re "^[ \t]*- \\[[ Xx-]\\] "
   "Regexp matching one line of a checklist rendered as org checkboxes.")
 
+(defconst ticktick--src-block-re
+  "\\`[ \t]*#\\+begin_src markdown[ \t]*\n\\(\\(?:.\\|\n\\)*\\)\n[ \t]*#\\+end_src[ \t]*\\'"
+  "Regexp matching a whole description wrapped in a markdown src block.")
+
+(defun ticktick--wrap-content (body)
+  "Put BODY in a markdown src block, unless that is switched off."
+  (if ticktick-content-as-src-block
+      (format "#+begin_src markdown\n%s\n#+end_src" body)
+    body))
+
+(defun ticktick--unwrap-content (body)
+  "Return the contents of a markdown src block in BODY, or BODY unchanged.
+Descriptions written before wrapping was introduced are bare, and a user
+may have switched the option off, so both shapes have to read back.  A
+literal \"#+end_src\" inside the description cannot end the block early:
+`org-escape-code-in-string' has already commented it out."
+  (if (string-match ticktick--src-block-re body)
+      (match-string 1 body)
+    body))
+
 (defun ticktick--strip-checkboxes-if-checklist (kind body)
   "Return BODY without its checkbox lines when KIND is \"CHECKLIST\".
 The checkbox list is a rendering of the task's items, not part of its
@@ -978,12 +1047,16 @@ read back as Org syntax."
     (string-join
      (delq nil
            (list
-            (format "%s %s%s %s%s"
+            (format "%s%s%s %s%s"
                     (make-string (or level 2) ?*)
-                    (pcase status
-                      (2 "DONE")
-                      (-1 ticktick-wont-do-keyword)
-                      (_ "TODO"))
+                    ;; A note is not something to be done, so it gets no
+                    ;; keyword at all -- just a plain heading.
+                    (if (equal kind "NOTE")
+                        ""
+                      (concat " " (pcase status
+                                    (2 "DONE")
+                                    (-1 ticktick-wont-do-keyword)
+                                    (_ "TODO"))))
                     (pcase priority (5 " [#A]") (3 " [#B]") (1 " [#C]") (_ ""))
                     title
                     (if (and tags (> (length tags) 0))
@@ -1006,7 +1079,7 @@ read back as Org syntax."
             ;; and not others, which callers then cannot append to safely.
             (let ((body (and content (string-trim content))))
               (unless (or (null body) (string-empty-p body))
-                (org-escape-code-in-string body)))
+                (ticktick--wrap-content (org-escape-code-in-string body))))
             (ticktick--items-to-checkboxes items)))
      "\n")))
 
@@ -1025,6 +1098,11 @@ Org escaping is removed from the content."
          (tags (org-element-property :tags el))
          (id (org-entry-get nil "TICKTICK_ID"))
          (kind (org-entry-get nil "TICKTICK_KIND"))
+         ;; A heading with no keyword is a note -- either one that came
+         ;; from TickTick as such, or one written that way in Org.
+         ;; Without this the next push would turn every note into an open
+         ;; task.
+         (note (or (equal kind "NOTE") (null keyword)))
          (content
           (save-excursion
             (save-restriction
@@ -1039,11 +1117,14 @@ Org escaping is removed from the content."
               (when (looking-at ":PROPERTIES:")
                 (re-search-forward "^:END:" nil t)
                 (forward-line))
-              (ticktick--strip-checkboxes-if-checklist
-               kind
-               (org-unescape-code-in-string
-                (string-trim
-                 (buffer-substring-no-properties (point) (point-max)))))))))
+              ;; Checkboxes sit outside the block, so they go first; the
+              ;; block is unwrapped before its contents are unescaped.
+              (org-unescape-code-in-string
+               (ticktick--unwrap-content
+                (ticktick--strip-checkboxes-if-checklist
+                 kind
+                 (string-trim
+                  (buffer-substring-no-properties (point) (point-max))))))))))
     `(("id" . ,id)
       ("title" . ,title)
       ("status" . ,(cond
@@ -1055,24 +1136,44 @@ Org escaping is removed from the content."
                       (format-time-string "%FT%T+0000"
                                           (org-timestamp-to-time deadline))))
       ("tags" . ,(when tags (vconcat tags)))
+      ;; A checklist stays one whichever way its heading reads; otherwise
+      ;; the absence of a keyword is what marks a note.
+      ("kind" . ,(cond ((equal kind "CHECKLIST") "CHECKLIST")
+                       (note "NOTE")
+                       (t "TEXT")))
       ("content" . ,content))))
+
+(defun ticktick--enclosing-project-level ()
+  "Return the outline level of the list heading point sits under, or nil."
+  (save-excursion
+    (catch 'found
+      (while (org-up-heading-safe)
+        (when (org-entry-get nil "TICKTICK_PROJECT_ID")
+          (throw 'found (org-current-level))))
+      nil)))
 
 (defun ticktick--task-heading-p ()
   "Return non-nil if point is on a heading this package treats as a task.
-Level-1 headings are projects.  Anything deeper than level 2 is a task
-only under `subtask'; under `fold' it is part of its parent's
-description."
-  (let ((level (org-current-level)))
+A task is a heading below the list heading that contains it -- which is
+not at a fixed depth, since a list inside a folder sits one level
+deeper.  Going further down is a task only under `subtask'; under `fold'
+it is part of its parent's description."
+  (let ((level (org-current-level))
+        (project-level (ticktick--enclosing-project-level)))
     (and level
-         (>= level 2)
-         (or (= level 2) (eq ticktick-subheading-behavior 'subtask))
-         (not (org-entry-get nil "TICKTICK_PROJECT_ID")))))
+         project-level
+         (> level project-level)
+         (or (= level (1+ project-level))
+             (eq ticktick-subheading-behavior 'subtask))
+         (not (org-entry-get nil "TICKTICK_PROJECT_ID"))
+         (not (org-entry-get nil "TICKTICK_GROUP_ID")))))
 
 (defun ticktick--parent-task-id ()
   "Return the TickTick id of the task this heading sits under, if any."
   (when (eq ticktick-subheading-behavior 'subtask)
     (save-excursion
-      (when (and (> (or (org-current-level) 0) 2)
+      (when (and (> (or (org-current-level) 0)
+                    (1+ (or (ticktick--enclosing-project-level) 1)))
                  (org-up-heading-safe))
         (let ((id (org-entry-get nil "TICKTICK_ID")))
           (unless (or (null id) (string-empty-p id)) id))))))
@@ -1107,6 +1208,14 @@ skipped silently."
       (while (re-search-forward
               "^:\\(LAST_SYNCED\\|SYNC_CACHE\\|TICKTICK_ETAG\\|TICKTICK_ID\\):.*\n" nil t)
         (replace-match "" nil nil))
+      ;; The src block delimiters are packaging, not content.  Ignoring
+      ;; them keeps a description's digest the same as it gains or loses
+      ;; the block, so switching `ticktick-content-as-src-block' does not
+      ;; make every task look edited and push itself back.
+      (goto-char (point-min))
+      (while (re-search-forward
+              "^[ \t]*#\\+\\(?:begin_src markdown\\|end_src\\)[ \t]*\n?" nil t)
+        (replace-match "" nil nil))
       (buffer-string))))
 
 (defun ticktick--should-sync-p ()
@@ -1124,14 +1233,99 @@ skipped silently."
 
 ;;; Sync functions -------------------------------------------------------------
 
-(defun ticktick--create-project-heading (project-title project-id)
+(defvar ticktick--project-groups nil
+  "Alist of (GROUP-ID . NAME) for the current sync, or nil.")
+
+(defun ticktick--fetch-project-groups ()
+  "Return an alist of (GROUP-ID . NAME) for the account's folders."
+  (let ((groups (ignore-errors
+                  (ticktick-request "GET" "/open/v1/project/group"))))
+    (delq nil
+          (mapcar (lambda (g)
+                    (let ((id (plist-get g :id))
+                          (name (plist-get g :name)))
+                      (when (and id name) (cons id name))))
+                  groups))))
+
+(defun ticktick--project-folder-name (project)
+  "Return the name of the folder PROJECT sits in, or nil.
+A folder whose name could not be looked up is treated as no folder:
+showing a raw group id as a heading would be worse than leaving the
+list where it was."
+  (when ticktick-group-projects-in-folders
+    (let ((group-id (plist-get project :groupId)))
+      (and group-id
+           (cdr (assoc group-id ticktick--project-groups))))))
+
+(defun ticktick--find-folder-heading (group-id)
+  "Return the position of the folder heading carrying GROUP-ID, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward
+           (format "^:TICKTICK_GROUP_ID: %s$" (regexp-quote group-id)) nil t)
+      (org-back-to-heading t)
+      (point))))
+
+(defun ticktick--ensure-folder-heading (group-id name)
+  "Return the position of the heading for folder GROUP-ID, creating it.
+NAME is used as the heading text when it has to be created."
+  (or (ticktick--find-folder-heading group-id)
+      (save-excursion
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (let ((start (point)))
+          (insert (format "* %s\n:PROPERTIES:\n:TICKTICK_GROUP_ID: %s\n:END:\n"
+                          name group-id))
+          start))))
+
+(defun ticktick--find-project-heading (project-id)
+  "Return the position of the heading carrying PROJECT-ID, or nil.
+Matching on the id rather than the title means a heading still gets
+found once it carries a tag, or once the list has been renamed in
+TickTick -- either of which used to produce a second heading for the
+same project."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward
+           (format "^:TICKTICK_PROJECT_ID: %s$" (regexp-quote project-id))
+           nil t)
+      (org-back-to-heading t)
+      (point))))
+
+(defun ticktick--place-project-under-folder (project-id group-id)
+  "Move the subtree for PROJECT-ID beneath the folder GROUP-ID.
+Returns the project heading's new position.  Does nothing when it is
+already in the right place, so an unchanged file is left untouched."
+  (let ((project-pos (ticktick--find-project-heading project-id)))
+    (when project-pos
+      (let ((already
+             (save-excursion
+               (goto-char project-pos)
+               (and (= (org-current-level) 2)
+                    (org-up-heading-safe)
+                    (equal (org-entry-get nil "TICKTICK_GROUP_ID") group-id)))))
+        (if already
+            project-pos
+          (save-excursion
+            (goto-char project-pos)
+            (org-cut-subtree)
+            ;; The cut may have moved the folder, so find it again.
+            (let ((folder-pos (ticktick--find-folder-heading group-id)))
+              (goto-char folder-pos)
+              (org-end-of-subtree t t)
+              (unless (bolp) (insert "\n"))
+              (org-paste-subtree 2)))
+          (ticktick--find-project-heading project-id))))))
+
+(defun ticktick--create-project-heading (project-title project-id &optional level)
   "Insert a new Org heading for PROJECT-TITLE with PROJECT-ID.
+LEVEL defaults to 1; a list inside a folder sits one level deeper.
 Return the buffer position at the start of the heading."
   (goto-char (point-max))
   (unless (bolp) (insert "\n"))            ; ensure we start on a fresh line
   (let ((start (point)))                   ; this will be the heading's start
-    (insert (format "* %s\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: %s\n:END:\n"
-                    project-title project-id))
+    (insert (format "%s %s\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: %s\n:END:\n"
+                    (make-string (or level 1) ?*) project-title project-id))
     start))
 
 
@@ -1228,19 +1422,47 @@ reaches the org file."
   (let* ((project-id (plist-get project :id))
          (project-title (plist-get project :name))
          (project-heading-re (format "^\\* %s$" (regexp-quote project-title)))
-         (project-pos (save-excursion
-                        (goto-char (point-min))
-                        (when (re-search-forward project-heading-re nil t)
-                          (match-beginning 0)))))
-    (unless project-pos
-      (setq project-pos (ticktick--create-project-heading project-title project-id)))
+         (project-pos (or (ticktick--find-project-heading project-id)
+                          (save-excursion
+                            (goto-char (point-min))
+                            (when (re-search-forward project-heading-re nil t)
+                              (match-beginning 0))))))
+    (let* ((group-id (plist-get project :groupId))
+           (folder (ticktick--project-folder-name project)))
+      (when folder
+        (ticktick--ensure-folder-heading group-id folder)
+        (when project-pos
+          (setq project-pos
+                (or (ticktick--place-project-under-folder project-id group-id)
+                    project-pos))))
+      (unless project-pos
+        (setq project-pos
+              (if folder
+                  (save-excursion
+                    (goto-char (ticktick--find-folder-heading group-id))
+                    (org-end-of-subtree t t)
+                    (unless (bolp) (insert "\n"))
+                    (let ((start (point)))
+                      (insert (format "** %s\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: %s\n:END:\n"
+                                      project-title project-id))
+                      start))
+                (ticktick--create-project-heading project-title project-id)))))
     (goto-char project-pos)
+    (when (eq ticktick-archived-project-behavior 'tag)
+      (save-excursion
+        (goto-char project-pos)
+        (org-toggle-tag ticktick--archived-tag
+                        (if (ticktick--project-archived-p project) 'on 'off))))
     (outline-show-subtree)
-    (let ((tasks (ticktick--project-task-list project-id)))
+    (let ((tasks (ticktick--project-task-list project-id))
+          ;; Tasks sit one level below their list, wherever that list is.
+          (task-level (1+ (save-excursion
+                            (goto-char project-pos)
+                            (org-current-level)))))
       (if (not (eq ticktick-subheading-behavior 'subtask))
           (dolist (task tasks)
-            (ticktick--sync-task task project-pos))
-        (ticktick--sync-task-forest tasks project-pos)))))
+            (ticktick--sync-task task project-pos project-pos task-level))
+        (ticktick--sync-task-forest tasks project-pos task-level)))))
 
 (defun ticktick--children-by-parent (tasks)
   "Group TASKS by their `parentId', returning a hash table."
@@ -1252,8 +1474,9 @@ reaches the org file."
                    by-parent))))
     by-parent))
 
-(defun ticktick--sync-task-forest (tasks project-pos)
+(defun ticktick--sync-task-forest (tasks project-pos &optional base-level)
   "Sync TASKS under PROJECT-POS, nesting each one below its parent.
+BASE-LEVEL is the level of a task directly under the list, default 2.
 A task whose parent is not among TASKS is treated as a root: the parent
 may be completed, deleted, or simply beyond the listing's limit, and
 hiding the child in that case would be worse than showing it flat."
@@ -1276,7 +1499,7 @@ hiding the child in that case would be worse than showing it flat."
       (dolist (task tasks)
         (let ((parent (plist-get task :parentId)))
           (unless (and parent (gethash parent known))
-            (funcall emit task project-pos 2)))))))
+            (funcall emit task project-pos (or base-level 2))))))))
 
 (defun ticktick--update-task (task project-id id)
   "Update existing task with TASK data, PROJECT-ID, and ID."
@@ -1323,7 +1546,10 @@ Also detects and handles tasks deleted from TickTick since last sync."
   ;; Fetch projects and tasks from API
   (let* ((inbox-project `(:id "inbox" :name "Inbox"))
          (projects (ticktick-request "GET" "/open/v1/project"))
-         (all-projects (cons inbox-project projects)))
+         (all-projects (cons inbox-project projects))
+         (ticktick--project-groups
+          (when ticktick-group-projects-in-folders
+            (ticktick--fetch-project-groups))))
 
     ;; Collect current API task IDs
     (let ((current-api-ids (ticktick--collect-api-task-ids all-projects))
@@ -1349,7 +1575,12 @@ Also detects and handles tasks deleted from TickTick since last sync."
         (ticktick--ensure-todo-keywords)
         (org-with-wide-buffer
          (dolist (project all-projects)
-           (ticktick--sync-project project))
+           ;; Archived projects are only left out of the org file.  Their
+           ;; task ids stay in `current-api-ids' above, or archiving a list
+           ;; in TickTick would look exactly like deleting all its tasks.
+           (unless (and (eq ticktick-archived-project-behavior 'skip)
+                        (ticktick--project-archived-p project))
+             (ticktick--sync-project project)))
          (save-buffer)))
 
       ;; Update state with current API task IDs

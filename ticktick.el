@@ -980,9 +980,35 @@ DATA is the optional request body data."
   "\\`[ \t]*#\\+begin_src markdown[ \t]*\n\\(\\(?:.\\|\n\\)*\\)\n[ \t]*#\\+end_src[ \t]*\\'"
   "Regexp matching a whole description wrapped in a markdown src block.")
 
+(defun ticktick--folding-p ()
+  "Return non-nil when nested headings are part of a task's description."
+  (not (eq ticktick-subheading-behavior 'subtask)))
+
+(defun ticktick--org-headings-to-markdown (text)
+  "Rewrite Org heading lines in TEXT as Markdown headings.
+Under `fold' a nested heading travels to TickTick inside the
+description, and `***' there is a horizontal rule rather than a heading.
+Sending `###' instead means the structure both reads correctly in
+TickTick and can be recognised again on the way back."
+  (replace-regexp-in-string
+   "^\\(\\*+\\) "
+   (lambda (m) (concat (make-string (length (match-string 1 m)) ?#) " "))
+   text))
+
+(defun ticktick--markdown-headings-to-org (text)
+  "Rewrite Markdown heading lines in TEXT as Org headings.
+Only a run of hashes followed by a space counts, so Org keyword lines
+like \"#+title:\" are left alone."
+  (replace-regexp-in-string
+   "^\\(#+\\) "
+   (lambda (m) (concat (make-string (length (match-string 1 m)) ?*) " "))
+   text))
+
 (defun ticktick--wrap-content (body)
-  "Put BODY in a markdown src block, unless that is switched off."
-  (if ticktick-content-as-src-block
+  "Put BODY in a markdown src block, unless that is switched off.
+Never wraps while folding: a nested heading has to stay live Org
+structure, and inside a block it would be inert text."
+  (if (and ticktick-content-as-src-block (not (ticktick--folding-p)))
       (format "#+begin_src markdown\n%s\n#+end_src" body)
     body))
 
@@ -1079,7 +1105,14 @@ read back as Org syntax."
             ;; and not others, which callers then cannot append to safely.
             (let ((body (and content (string-trim content))))
               (unless (or (null body) (string-empty-p body))
-                (ticktick--wrap-content (org-escape-code-in-string body))))
+                ;; Escape first, so prose beginning with `*' stays prose,
+                ;; and only then turn Markdown headings back into Org
+                ;; ones -- escaping leaves those alone, since a run of
+                ;; hashes is not the `#+' it looks for.
+                (let ((escaped (org-escape-code-in-string body)))
+                  (if (ticktick--folding-p)
+                      (ticktick--markdown-headings-to-org escaped)
+                    (ticktick--wrap-content escaped)))))
             (ticktick--items-to-checkboxes items)))
      "\n")))
 
@@ -1119,12 +1152,19 @@ Org escaping is removed from the content."
                 (forward-line))
               ;; Checkboxes sit outside the block, so they go first; the
               ;; block is unwrapped before its contents are unescaped.
-              (org-unescape-code-in-string
-               (ticktick--unwrap-content
-                (ticktick--strip-checkboxes-if-checklist
-                 kind
-                 (string-trim
-                  (buffer-substring-no-properties (point) (point-max))))))))))
+              ;; Headings are converted before unescaping, not after: an
+              ;; escaped `,*** x' is prose the user wrote, and unescaping
+              ;; first would turn it into a heading on the way out.
+              (let ((body (ticktick--unwrap-content
+                           (ticktick--strip-checkboxes-if-checklist
+                            kind
+                            (string-trim
+                             (buffer-substring-no-properties
+                              (point) (point-max)))))))
+                (org-unescape-code-in-string
+                 (if (ticktick--folding-p)
+                     (ticktick--org-headings-to-markdown body)
+                   body)))))))
     `(("id" . ,id)
       ("title" . ,title)
       ("status" . ,(cond

@@ -238,6 +238,34 @@ Descriptions written before this existed are still read back either way,
 and gain the block the next time the task changes. Switching the option
 does not by itself make tasks look edited.
 
+### Folders
+
+By default every list is a top-level heading, regardless of the folder it
+sits in in TickTick. To mirror the folders:
+
+```elisp
+(setq ticktick-group-projects-in-folders t)
+```
+
+The folder becomes the top-level heading, its lists sit one level below,
+and their tasks one level below that:
+
+```org
+* Work
+:PROPERTIES:
+:TICKTICK_GROUP_ID: grp123
+:END:
+** Client project
+:PROPERTIES:
+:TICKTICK_PROJECT_ID: prj456
+:END:
+*** TODO Send the invoice
+```
+
+Turning this on rearranges the file — lists already in it are moved under
+their folder, tasks and all. Lists in no folder, including the Inbox, stay
+where they are.
+
 ### Archived Lists
 
 A list archived in TickTick keeps syncing, with an `:archived:` tag on its

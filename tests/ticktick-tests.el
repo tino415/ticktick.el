@@ -761,5 +761,89 @@ Their ids have to stay in the snapshot even though nothing is written."
        (ticktick-push-from-org)
        (should (equal pushed '("NOTE")))))))
 
+;;; Folders
+
+(defun ticktick-test--heading-levels ()
+  "Alist of (HEADING-TEXT . LEVEL) for the whole sync file."
+  (with-current-buffer (find-file-noselect ticktick-sync-file)
+    (org-with-wide-buffer
+     (let (out)
+       (goto-char (point-min))
+       (while (outline-next-heading)
+         (push (cons (org-get-heading t t t t) (org-current-level)) out))
+       (nreverse out)))))
+
+(ert-deftest ticktick-test-folders-off-keeps-lists-at-top-level ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders nil))
+     (ticktick-fetch-to-org))
+   (let ((levels (ticktick-test--heading-levels)))
+     (should (equal (cdr (assoc "🏗Ticktick.el" levels)) 1))
+     (should (equal (cdr (assoc "Test task active" levels)) 2))
+     (should-not (assoc "Other" levels)))))
+
+(ert-deftest ticktick-test-folders-on-nests-list-and-tasks ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org))
+   (let ((levels (ticktick-test--heading-levels)))
+     (should (equal (cdr (assoc "Other" levels)) 1))
+     (should (equal (cdr (assoc "🏗Ticktick.el" levels)) 2))
+     (should (equal (cdr (assoc "Test task active" levels)) 3)))))
+
+(ert-deftest ticktick-test-ungrouped-list-stays-at-top-level ()
+  "The inbox belongs to no folder, so it must not be moved."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org))
+   (should (equal (cdr (assoc "Inbox" (ticktick-test--heading-levels))) 1))))
+
+(ert-deftest ticktick-test-existing-list-is-moved-under-its-folder ()
+  "Turning grouping on rearranges a file that was already flat."
+  (ticktick-test--with-env
+   (ticktick-test--org-file (list ticktick-test-active))
+   (let ((ticktick-group-projects-in-folders nil))
+     (ticktick-fetch-to-org))
+   (should (equal (cdr (assoc "🏗Ticktick.el" (ticktick-test--heading-levels))) 1))
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org))
+   (let ((levels (ticktick-test--heading-levels)))
+     (should (equal (cdr (assoc "🏗Ticktick.el" levels)) 2))
+     ;; the tasks came with it rather than being left behind
+     (should (equal (cdr (assoc "Test task active" levels)) 3)))))
+
+(ert-deftest ticktick-test-grouping-does-not-duplicate-on-resync ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org)
+     (ticktick-fetch-to-org))
+   (let ((folders 0) (lists 0))
+     (dolist (h (ticktick-test--heading-levels))
+       (when (equal (car h) "Other") (setq folders (1+ folders)))
+       (when (equal (car h) "🏗Ticktick.el") (setq lists (1+ lists))))
+     (should (= folders 1))
+     (should (= lists 1)))))
+
+(ert-deftest ticktick-test-nested-tasks-are-still-pushed-when-grouped ()
+  "A task one level deeper must still be recognised as a task."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-group-projects-in-folders t))
+     (ticktick-fetch-to-org))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
+      (should (= (org-current-level) 3))
+      (should (ticktick--task-heading-p))
+      ;; and neither the folder nor the list counts as one
+      (goto-char (ticktick--find-project-heading ticktick-test-project-id))
+      (should-not (ticktick--task-heading-p))
+      (org-up-heading-safe)
+      (should-not (ticktick--task-heading-p))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

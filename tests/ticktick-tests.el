@@ -604,10 +604,13 @@ Their ids have to stay in the snapshot even though nothing is written."
 ;;; Descriptions as markdown blocks
 
 (ert-deftest ticktick-test-description-is-wrapped-in-a-src-block ()
-  "The note fixture's body is markdown bullets, which Org would eat."
+  "The note fixture's body is markdown bullets, which Org would eat.
+Wrapping only applies with real subtasks; while folding, a description
+has to stay live Org so that a nested heading survives."
   (ticktick-test--with-env
    (ticktick-test--org-file nil)
-   (ticktick-fetch-to-org)
+   (let ((ticktick-subheading-behavior 'subtask))
+     (ticktick-fetch-to-org))
    (with-current-buffer (find-file-noselect ticktick-sync-file)
      (org-with-wide-buffer
       (goto-char (ticktick--find-task-by-id-in-org ticktick-test-note))
@@ -644,7 +647,8 @@ Their ids have to stay in the snapshot even though nothing is written."
 
 (ert-deftest ticktick-test-end-src-in-a-description-cannot-break-out ()
   (ticktick-test--with-env
-   (let ((heading (ticktick--task-to-heading
+   (let* ((ticktick-subheading-behavior 'subtask)
+          (heading (ticktick--task-to-heading
                    '(:id "x" :title "T" :status 0 :priority 0 :etag "e"
                          :content "before\n#+end_src\nafter"))))
      ;; exactly one unescaped terminator: the block's own
@@ -844,6 +848,85 @@ Their ids have to stay in the snapshot even though nothing is written."
       (should-not (ticktick--task-heading-p))
       (org-up-heading-safe)
       (should-not (ticktick--task-heading-p))))))
+
+;;; Headings inside a description
+
+(defun ticktick-test--render (content)
+  "Heading text produced for a task whose description is CONTENT."
+  (ticktick--task-to-heading
+   (list :id "x" :title "Parent" :status 0 :priority 0 :etag "e"
+         :content content)))
+
+(ert-deftest ticktick-test-fold-round-trips-a-nested-heading ()
+  "The conflict this task exists for: both goals must hold at once."
+  (ticktick-test--with-env
+   (let ((ticktick-subheading-behavior 'fold))
+     ;; org -> ticktick
+     (with-temp-file ticktick-sync-file
+       (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+               ticktick-test-project-id "\n:END:\n"
+               "** TODO Parent\n:PROPERTIES:\n:TICKTICK_ID: p-9\n:END:\n"
+               "parent body\n*** TODO Child\nchild body\n"))
+     (let (sent)
+       (with-current-buffer (find-file-noselect ticktick-sync-file)
+         (org-with-wide-buffer
+          (goto-char (ticktick--find-task-by-id-in-org "p-9"))
+          (setq sent (cdr (assoc "content" (ticktick--heading-to-task))))))
+       ;; markdown, so TickTick shows a heading rather than a rule
+       (should (string-match-p "^### TODO Child$" sent))
+       (should-not (string-match-p "\\*\\*\\* TODO Child" sent))
+       ;; ticktick -> org, and it is a heading again
+       (should (string-match-p "^\\*\\*\\* TODO Child$"
+                               (ticktick-test--render sent)))))))
+
+(ert-deftest ticktick-test-fold-keeps-prose-that-looks-like-syntax ()
+  "Escaping still has to protect a description that starts with a star."
+  (ticktick-test--with-env
+   (let ((ticktick-subheading-behavior 'fold))
+     (let ((rendered (ticktick-test--render "* a bullet\n#+not_a_keyword")))
+       (should (string-match-p "^,\\* a bullet$" rendered))
+       (should (string-match-p "^,#\\+not_a_keyword$" rendered))))))
+
+(ert-deftest ticktick-test-fold-does-not-promote-escaped-prose ()
+  "Prose the user escaped must not become a heading on the way out."
+  (ticktick-test--with-env
+   (let ((ticktick-subheading-behavior 'fold))
+     (with-temp-file ticktick-sync-file
+       (insert "* P\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: "
+               ticktick-test-project-id "\n:END:\n"
+               "** TODO T\n:PROPERTIES:\n:TICKTICK_ID: p-8\n:END:\n"
+               ",* just a bullet\n"))
+     (with-current-buffer (find-file-noselect ticktick-sync-file)
+       (org-with-wide-buffer
+        (goto-char (ticktick--find-task-by-id-in-org "p-8"))
+        (let ((sent (cdr (assoc "content" (ticktick--heading-to-task)))))
+          (should (equal sent "* just a bullet"))
+          (should-not (string-match-p "#" sent))))))))
+
+(ert-deftest ticktick-test-fold-leaves-org-keyword-lines-alone ()
+  "A run of hashes is a heading; \"#+\" is an Org keyword."
+  (should (equal (ticktick--markdown-headings-to-org "#+title: x") "#+title: x"))
+  (should (equal (ticktick--markdown-headings-to-org "## two") "** two"))
+  (should (equal (ticktick--org-headings-to-markdown "** two") "## two")))
+
+(ert-deftest ticktick-test-folding-does-not-wrap-in-a-block ()
+  "A nested heading inside a src block would be inert text."
+  (ticktick-test--with-env
+   (let ((ticktick-subheading-behavior 'fold)
+         (ticktick-content-as-src-block t))
+     (should-not (string-match-p "begin_src"
+                                 (ticktick-test--render "### Child"))))
+   (let ((ticktick-subheading-behavior 'subtask)
+         (ticktick-content-as-src-block t))
+     (should (string-match-p "begin_src"
+                             (ticktick-test--render "some prose"))))))
+
+(ert-deftest ticktick-test-subtask-mode-does-not-translate-headings ()
+  "With real subtasks the description is prose; leave its hashes alone."
+  (ticktick-test--with-env
+   (let ((ticktick-subheading-behavior 'subtask))
+     (should (string-match-p "^### Child$"
+                             (ticktick-test--render "### Child"))))))
 
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

@@ -238,6 +238,20 @@ Descriptions written before this existed are still read back either way,
 and gain the block the next time the task changes. Switching the option
 does not by itself make tasks look edited.
 
+The block only applies with `ticktick-subheading-behavior` set to
+`subtask`. While folding, a nested heading lives inside the description
+and has to stay live Org, which a source block would prevent — so the two
+cannot both apply, and folding wins.
+
+In that mode headings are translated instead. A nested Org heading is sent
+as a Markdown one (`*** Child` becomes `### Child`), which reads correctly
+in TickTick — `***` there is a horizontal rule, not a heading — and is
+turned back into an Org heading on the way in. Description text that
+merely starts with `*` or `#+` is still escaped and stays prose, at the
+cost of a visible leading comma in the org file. That ambiguity is
+unavoidable while a description and the file's structure share one
+syntax; the `subtask` mode avoids it entirely.
+
 ### Folders
 
 By default every list is a top-level heading, regardless of the folder it

@@ -996,5 +996,81 @@ It must still be removed, because the snapshot does not list it."
      (ticktick-fetch-to-org)
      (should (null ticktick-test--deleted-from-org)))))
 
+;;; Checkbox edits going back
+
+(ert-deftest ticktick-test-checkbox-state-is-sent-back ()
+  "Ticking a box in Org reaches TickTick, using 1 rather than 2."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      ;; tick "Check 1"
+      (save-excursion
+        (re-search-forward "^- \\[ \\] Check 1$" nil t)
+        (replace-match "- [X] Check 1"))
+      (let* ((items (cdr (assoc "items" (ticktick--heading-to-task))))
+             (by-title (mapcar (lambda (it)
+                                 (cons (cdr (assoc "title" it))
+                                       (cdr (assoc "status" it))))
+                               (append items nil))))
+        (should (equal (cdr (assoc "Check 1" by-title)) 1))
+        (should (equal (cdr (assoc "Check 2" by-title)) 0))
+        (should (equal (cdr (assoc "Check completed" by-title)) 1)))))))
+
+(ert-deftest ticktick-test-every-item-is-sent-not-just-changed-ones ()
+  "The array replaces the list, so leaving one out would delete it."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      (let ((items (cdr (assoc "items" (ticktick--heading-to-task)))))
+        (should (= (length items) 3)))))))
+
+(ert-deftest ticktick-test-items-keep-the-order-of-the-file ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      (let ((titles (mapcar (lambda (it) (cdr (assoc "title" it)))
+                            (append (cdr (assoc "items"
+                                                (ticktick--heading-to-task)))
+                                    nil))))
+        (should (equal titles '("Check 1" "Check 2" "Check completed"))))))))
+
+(ert-deftest ticktick-test-no-items-key-for-an-ordinary-task ()
+  "Sending the key at all would wipe a non-checklist task's items."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-active))
+      (should-not (assoc "items" (ticktick--heading-to-task)))))))
+
+(ert-deftest ticktick-test-checkbox-lines-are-still-not-the-description ()
+  "The items travel as items; they must not also be sent as prose."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-task-by-id-in-org ticktick-test-checklist))
+      (let ((task (ticktick--heading-to-task)))
+        (should-not (string-match-p "Check 1" (cdr (assoc "content" task)))))))))
+
+(ert-deftest ticktick-test-checkbox-parsing-reads-both-marks ()
+  (let ((items (append (ticktick--checkboxes-to-items
+                        "- [ ] open\n- [X] big\n- [x] small\nnot a checkbox")
+                       nil)))
+    (should (= (length items) 3))
+    (should (equal (mapcar (lambda (it) (cdr (assoc "status" it))) items)
+                   '(0 1 1)))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

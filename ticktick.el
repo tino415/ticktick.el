@@ -1593,10 +1593,17 @@ hiding the child in that case would be worse than showing it flat."
           (unless (and parent (gethash parent known))
             (funcall emit task project-pos (or base-level 2))))))))
 
-(defun ticktick--update-task (task project-id id)
-  "Update existing task with TASK data, PROJECT-ID, and ID."
+(defun ticktick--update-task (task project-id id &optional parent-id)
+  "Update existing task with TASK data, PROJECT-ID, and ID.
+PARENT-ID moves the task under another one; an empty string detaches it
+from the one it is under.  Pass nil to leave its place alone -- which is
+what must happen while folding, where a nested heading is description
+text and Org has no idea which tasks are subtasks in TickTick."
   (ticktick-request "POST" (format "/open/v1/task/%s" id)
-                    (append task `(("projectId" . ,project-id))))
+                    (append task
+                            `(("projectId" . ,project-id))
+                            (when parent-id
+                              `(("parentId" . ,parent-id)))))
   (ticktick--update-sync-meta)
   ;; The keys are strings, so the lookup needs `equal' -- with the
   ;; default `eq' this reported every push as "Updated: nil".
@@ -1604,9 +1611,8 @@ hiding the child in that case would be worse than showing it flat."
 
 (defun ticktick--create-task (task project-id &optional parent-id)
   "Create new task with TASK data and PROJECT-ID.
-PARENT-ID, when given, makes the new task a subtask of that one.  It is
-only set at creation: changing an existing task's parent through this
-endpoint has not been verified to work."
+PARENT-ID, when given, makes the new task a subtask of that one.
+See `ticktick--update-task' for moving one afterwards."
   (let ((resp (ticktick-request "POST" "/open/v1/task"
                                 (append task
                                         `(("projectId" . ,project-id))
@@ -1712,7 +1718,13 @@ Also detects and handles tasks deleted from Org since last sync."
                   (project-id (org-entry-get nil "TICKTICK_PROJECT_ID" t))
                   (id (org-entry-get nil "TICKTICK_ID")))
              (if (and id (not (string-empty-p id)))
-                 (ticktick--update-task task project-id id)
+                 ;; While folding, say nothing about the task's place:
+                 ;; sending "" for every top-level heading would flatten
+                 ;; any subtask hierarchy the account already has.
+                 (ticktick--update-task
+                  task project-id id
+                  (when (eq ticktick-subheading-behavior 'subtask)
+                    (or (ticktick--parent-task-id) "")))
                (ticktick--create-task task project-id
                                       (ticktick--parent-task-id)))))))
      (save-buffer)))

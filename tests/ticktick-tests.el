@@ -1072,5 +1072,42 @@ It must still be removed, because the snapshot does not list it."
     (should (equal (mapcar (lambda (it) (cdr (assoc "status" it))) items)
                    '(0 1 1)))))
 
+;;; Moving a task under a different parent
+
+(defun ticktick-test--pushed-parents ()
+  "Alist of (TITLE . PARENT-ID-SENT) for each task an update pushed.
+PARENT-ID-SENT is the symbol `omitted' when no parentId was sent."
+  (let (out)
+    (cl-letf (((symbol-function 'ticktick--update-task)
+               (lambda (task _project-id _id &optional parent-id)
+                 (push (cons (cdr (assoc "title" task))
+                             (or parent-id 'omitted))
+                       out)))
+              ((symbol-function 'ticktick--create-task)
+               (lambda (&rest _) nil)))
+      (ticktick-push-from-org))
+    out))
+
+(ert-deftest ticktick-test-subtask-mode-sends-the-parent-on-update ()
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'subtask))
+     (let ((sent (ticktick-test--pushed-parents)))
+       ;; the child names its parent
+       (should (equal (cdr (assoc "child" sent)) "p-1"))
+       ;; and a top-level task says it has none, so a task moved out in
+       ;; Org is detached in TickTick rather than left where it was
+       (should (equal (cdr (assoc "parent" sent)) ""))))))
+
+(ert-deftest ticktick-test-fold-mode-never-sends-a-parent ()
+  "Sending \"\" for every heading would flatten the account's subtasks."
+  (ticktick-test--with-env
+   (ticktick-test--nested-file)
+   (let ((ticktick-subheading-behavior 'fold))
+     (let ((sent (ticktick-test--pushed-parents)))
+       (should (equal (cdr (assoc "parent" sent)) 'omitted))
+       ;; the nested heading is description text here, not a task at all
+       (should-not (assoc "child" sent))))))
+
 (provide 'ticktick-tests)
 ;;; ticktick-tests.el ends here

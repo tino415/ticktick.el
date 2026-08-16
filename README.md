@@ -328,10 +328,12 @@ notes that stay with the parent
 :END:
 ```
 
-Two things to know before switching. Nested headings you already have will
+One thing to know before switching: nested headings you already have will
 move out of their parent's descriptions and be created as real tasks on the
-next sync. And a subtask's parent is set when the task is created — moving a
-heading under a different parent afterwards is not yet sent to TickTick.
+next sync.
+
+Moving a heading under a different task, or out to the top level, is sent
+to TickTick as well — the task moves rather than being recreated.
 
 A subtask whose parent is missing from TickTick's response — completed,
 deleted, or beyond the API's 200-task reply limit — is shown at the top

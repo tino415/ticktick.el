@@ -346,11 +346,16 @@ as TickTick orders it:
 - [X] milk
 ```
 
-This is currently one-way: the items are shown, but ticking a box in Org
-does not tick it in TickTick. The list is not sent back as the task's
-description, and the items held by TickTick are left untouched, so nothing
-is lost by syncing a checklist — its items simply follow whatever TickTick
-says. Editing the rest of the task works as normal.
+Ticking a box in Org ticks it in TickTick on the next push, and reordering
+the lines reorders the list. The checkbox lines are not sent as the task's
+description.
+
+The org file holds the whole list, because TickTick replaces a checklist's
+items wholesale rather than updating them one by one: whatever the file
+says the list becomes, so deleting a line deletes the item. For the same
+reason TickTick issues fresh item ids on every push — nothing in the org
+file refers to them, but a completion timestamp set in the app is not
+preserved when the task is next pushed from Org.
 
 ### Tags
 

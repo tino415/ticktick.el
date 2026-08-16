@@ -1032,12 +1032,37 @@ literal \"#+end_src\" inside the description cannot end the block early:
       (match-string 1 body)
     body))
 
+(defun ticktick--checkboxes-to-items (body)
+  "Read the checkbox lines of BODY back into a TickTick items array.
+
+The array replaces the task's items wholesale, so it has to carry every
+one of them -- anything left out is deleted.  That is why the org file
+holds the complete list rather than a subset.
+
+Item ids are deliberately not sent.  TickTick regenerates them on every
+write whether or not the old ones are supplied, so there is nothing to
+preserve by matching a checkbox to the item it came from.  Order is
+taken from the file, which does mean reordering the list in Org
+reorders it in TickTick.
+
+Note the value for a completed item is 1, not the 2 a completed task
+uses."
+  (vconcat
+   (delq nil
+         (mapcar
+          (lambda (line)
+            (when (string-match
+                   "^[ \t]*- \\[\\([ Xx-]\\)\\][ \t]*\\(.*\\)$" line)
+              `(("title" . ,(string-trim (match-string 2 line)))
+                ("status" . ,(if (member (match-string 1 line) '("X" "x"))
+                                 1 0)))))
+          (split-string body "\n")))))
+
 (defun ticktick--strip-checkboxes-if-checklist (kind body)
   "Return BODY without its checkbox lines when KIND is \"CHECKLIST\".
 The checkbox list is a rendering of the task's items, not part of its
 description, and sending it as the description would leave the text
-duplicated in TickTick.  Items themselves are left untouched: the update
-endpoint merges, so omitting them preserves what the server holds."
+duplicated in TickTick.  The items travel separately, as `items'."
   (if (not (equal kind "CHECKLIST"))
       body
     (string-trim
@@ -1146,7 +1171,7 @@ Org escaping is removed from the content."
          ;; Without this the next push would turn every note into an open
          ;; task.
          (note (or (equal kind "NOTE") (null keyword)))
-         (content
+         (raw-body
           (save-excursion
             (save-restriction
               ;; The same region the hash covers, so a change that gets
@@ -1160,21 +1185,22 @@ Org escaping is removed from the content."
               (when (looking-at ":PROPERTIES:")
                 (re-search-forward "^:END:" nil t)
                 (forward-line))
-              ;; Checkboxes sit outside the block, so they go first; the
-              ;; block is unwrapped before its contents are unescaped.
-              ;; Headings are converted before unescaping, not after: an
-              ;; escaped `,*** x' is prose the user wrote, and unescaping
-              ;; first would turn it into a heading on the way out.
-              (let ((body (ticktick--unwrap-content
-                           (ticktick--strip-checkboxes-if-checklist
-                            kind
-                            (string-trim
-                             (buffer-substring-no-properties
-                              (point) (point-max)))))))
-                (org-unescape-code-in-string
-                 (if (ticktick--folding-p)
-                     (ticktick--org-headings-to-markdown body)
-                   body)))))))
+              (string-trim
+               (buffer-substring-no-properties (point) (point-max))))))
+         ;; Checkboxes come out of the raw body before anything else, so
+         ;; the description and the items are read from the same text.
+         (content
+          ;; The block is unwrapped before its contents are unescaped, and
+          ;; headings are converted before unescaping rather than after:
+          ;; an escaped `,*** x' is prose the user wrote, and unescaping
+          ;; first would turn it into a heading on the way out.
+          (let ((body (ticktick--unwrap-content
+                       (ticktick--strip-checkboxes-if-checklist
+                        kind raw-body))))
+            (org-unescape-code-in-string
+             (if (ticktick--folding-p)
+                 (ticktick--org-headings-to-markdown body)
+               body)))))
     `(("id" . ,id)
       ("title" . ,title)
       ("status" . ,(cond
@@ -1191,6 +1217,10 @@ Org escaping is removed from the content."
       ("kind" . ,(cond ((equal kind "CHECKLIST") "CHECKLIST")
                        (note "NOTE")
                        (t "TEXT")))
+      ;; Only for a checklist: sending this replaces the task's items, so
+      ;; anything else must leave the key out entirely.
+      ,@(when (equal kind "CHECKLIST")
+          `(("items" . ,(ticktick--checkboxes-to-items raw-body))))
       ("content" . ,content))))
 
 (defun ticktick--enclosing-project-level ()
@@ -1556,7 +1586,9 @@ hiding the child in that case would be worse than showing it flat."
   (ticktick-request "POST" (format "/open/v1/task/%s" id)
                     (append task `(("projectId" . ,project-id))))
   (ticktick--update-sync-meta)
-  (message "Updated: %s" (alist-get "title" task)))
+  ;; The keys are strings, so the lookup needs `equal' -- with the
+  ;; default `eq' this reported every push as "Updated: nil".
+  (message "Updated: %s" (alist-get "title" task nil nil #'equal)))
 
 (defun ticktick--create-task (task project-id &optional parent-id)
   "Create new task with TASK data and PROJECT-ID.

@@ -550,36 +550,53 @@ Its parent may be completed, deleted, or past the filter's limit."
   (should (ticktick--project-archived-p '(:id "x" :closed t)))
   (should-not (ticktick--project-archived-p '(:id "x"))))
 
-(ert-deftest ticktick-test-archived-project-gets-tagged ()
+(ert-deftest ticktick-test-archived-project-moves-under-archived-heading ()
   (ticktick-test--with-env
    (ticktick-test--org-file nil)
-   (let ((ticktick-archived-project-behavior 'tag))
-     (ticktick-test--with-archived-project (ticktick-fetch-to-org)))
-   (should (string-match-p "^\\* .*Ticktick\\.el.*:archived:"
-                           (ticktick-test--org-contents)))))
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (let ((levels (ticktick-test--heading-levels)))
+     (should (equal (cdr (assoc "Archived" levels)) 1))
+     (should (equal (cdr (assoc "🏗Ticktick.el" levels)) 2)))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-project-heading ticktick-test-project-id))
+      (org-up-heading-safe)
+      (should (equal (org-entry-get nil "TICKTICK_ARCHIVED") "t"))))))
 
-(ert-deftest ticktick-test-unarchiving-removes-the-tag ()
+(ert-deftest ticktick-test-archived-project-keeps-its-tasks ()
+  "Being archived changes where a list sits, not whether it syncs."
   (ticktick-test--with-env
    (ticktick-test--org-file nil)
-   (let ((ticktick-archived-project-behavior 'tag))
-     (ticktick-test--with-archived-project (ticktick-fetch-to-org))
-     (should (string-match-p ":archived:" (ticktick-test--org-contents)))
-     ;; now the server says it is open again
-     (ticktick-fetch-to-org)
-     (should-not (string-match-p ":archived:" (ticktick-test--org-contents))))))
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (should (equal (cdr (assoc "Test task active"
+                              (ticktick-test--heading-levels)))
+                  3))))
 
-(ert-deftest ticktick-test-project-is-found-despite-a-tag ()
-  "Tagging the heading must not make the next sync create a second one."
+(ert-deftest ticktick-test-unarchiving-moves-the-list-back-out ()
   (ticktick-test--with-env
    (ticktick-test--org-file nil)
-   (let ((ticktick-archived-project-behavior 'tag))
-     (ticktick-test--with-archived-project (ticktick-fetch-to-org))
-     (ticktick-fetch-to-org))
-   (let ((headings 0))
-     (dolist (line (split-string (ticktick-test--org-contents) "\n"))
-       (when (string-match-p "^\\* .*Ticktick\\.el" line)
-         (setq headings (1+ headings))))
-     (should (= headings 1)))))
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (should (equal (cdr (assoc "🏗Ticktick.el" (ticktick-test--heading-levels))) 2))
+   ;; now the server says it is open again
+   (ticktick-fetch-to-org)
+   (let ((levels (ticktick-test--heading-levels)))
+     (should (equal (cdr (assoc "🏗Ticktick.el" levels)) 1))
+     ;; and its tasks came back up with it
+     (should (equal (cdr (assoc "Test task active" levels)) 2)))))
+
+(ert-deftest ticktick-test-archiving-does-not-duplicate-the-list ()
+  "Moving the heading must not leave a second one behind."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-fetch-to-org)
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (let ((lists 0) (archived 0))
+     (dolist (h (ticktick-test--heading-levels))
+       (when (equal (car h) "🏗Ticktick.el") (setq lists (1+ lists)))
+       (when (equal (car h) "Archived") (setq archived (1+ archived))))
+     (should (= lists 1))
+     (should (= archived 1)))))
 
 (ert-deftest ticktick-test-skip-leaves-archived-project-out ()
   (ticktick-test--with-env

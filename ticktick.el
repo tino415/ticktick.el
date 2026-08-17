@@ -98,7 +98,7 @@
 ;; - `ticktick-httpd-port': Port for OAuth callback server
 ;; - `ticktick-import-completed-tasks': Pull already-completed tasks into Org
 ;; - `ticktick-subheading-behavior': Nested heading as description or subtask
-;; - `ticktick-archived-project-behavior': Tag or skip archived lists
+;; - `ticktick-archived-project-behavior': Gather or skip archived lists
 ;; - `ticktick-content-as-src-block': Keep descriptions in a markdown block
 ;; - `ticktick-group-projects-in-folders': Nest lists under their folder
 ;; - `ticktick-wont-do-keyword': Org keyword for tasks marked "won't do"
@@ -221,15 +221,15 @@ correctly; they gain the block the next time the task changes."
   :type 'boolean
   :group 'ticktick)
 
-(defcustom ticktick-archived-project-behavior 'tag
+(defcustom ticktick-archived-project-behavior 'heading
   "What to do with lists that have been archived in TickTick.
-- `tag': keep syncing them, with an :archived: tag on the project
-  heading.  Un-archiving a list removes the tag again.
+- `heading': keep syncing them, gathered under a top-level \"Archived\"
+  heading.  Un-archiving a list moves it back out again.
 - `skip': leave them out of the org file.
 
 Either way their tasks stay accounted for internally, so archiving a
 list in TickTick never looks like its tasks were deleted."
-  :type '(choice (const :tag "Tag the project heading" tag)
+  :type '(choice (const :tag "Gather under an Archived heading" heading)
                  (const :tag "Leave them out" skip))
   :group 'ticktick)
 
@@ -388,8 +388,12 @@ This is a plist with keys:
              (push id task-ids))))))
     (nreverse task-ids)))
 
-(defconst ticktick--archived-tag "archived"
-  "Org tag put on the heading of a list archived in TickTick.")
+(defcustom ticktick-archived-heading "Archived"
+  "Title of the heading that archived lists are gathered under.
+Renaming it in the org file is fine: the heading is found by its
+TICKTICK_ARCHIVED property, not by its title."
+  :type 'string
+  :group 'ticktick)
 
 (defun ticktick--project-archived-p (project)
   "Return non-nil if PROJECT has been archived in TickTick.
@@ -1393,36 +1397,102 @@ same project."
       (org-back-to-heading t)
       (point))))
 
-(defun ticktick--place-project-under-folder (project-id group-id)
-  "Move the subtree for PROJECT-ID beneath the folder GROUP-ID.
-Returns the project heading's new position.  Does nothing when it is
-already in the right place, so an unchanged file is left untouched."
+(defun ticktick--find-archived-heading ()
+  "Return the position of the archived-lists heading, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^:TICKTICK_ARCHIVED: t$" nil t)
+      (org-back-to-heading t)
+      (point))))
+
+(defun ticktick--ensure-archived-heading ()
+  "Return the position of the archived-lists heading, creating it."
+  (or (ticktick--find-archived-heading)
+      (save-excursion
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (let ((start (point)))
+          (insert (format "* %s\n:PROPERTIES:\n:TICKTICK_ARCHIVED: t\n:END:\n"
+                          ticktick-archived-heading))
+          start))))
+
+(defun ticktick--project-destination (project)
+  "Return where PROJECT's heading belongs, as (FIND-PARENT . LEVEL).
+FIND-PARENT returns the parent heading's position, creating it if need
+be, or nil for the top level.  It is a function rather than a position
+because moving a subtree invalidates positions taken beforehand.
+
+Being archived wins over belonging to a folder: a list put away in
+TickTick should read as put away in Org too."
+  (let ((group-id (plist-get project :groupId))
+        (folder (ticktick--project-folder-name project)))
+    (cond
+     ((and (ticktick--project-archived-p project)
+           (eq ticktick-archived-project-behavior 'heading))
+      (cons #'ticktick--ensure-archived-heading 2))
+     (folder
+      (cons (lambda () (ticktick--ensure-folder-heading group-id folder)) 2))
+     (t (cons #'ignore 1)))))
+
+(defun ticktick--project-placed-p (project-pos parent-pos level)
+  "Return non-nil if the heading at PROJECT-POS already sits right.
+PARENT-POS is the heading it should be under, or nil for the top level,
+and LEVEL the depth it should be at."
+  (save-excursion
+    (goto-char project-pos)
+    (and (eql (org-current-level) level)
+         (if parent-pos
+             (and (org-up-heading-safe) (eql (point) parent-pos))
+           t))))
+
+(defun ticktick--move-project (project-id find-parent level)
+  "Move PROJECT-ID's subtree under the heading FIND-PARENT gives.
+FIND-PARENT is called after the subtree has been cut, because cutting
+shifts everything below it; nil from it means the end of the file.
+LEVEL is the depth to paste at.  Return the heading's new position."
   (let ((project-pos (ticktick--find-project-heading project-id)))
     (when project-pos
-      (let ((already
-             (save-excursion
-               (goto-char project-pos)
-               (and (= (org-current-level) 2)
-                    (org-up-heading-safe)
-                    (equal (org-entry-get nil "TICKTICK_GROUP_ID") group-id)))))
-        (if already
-            project-pos
-          (save-excursion
-            (goto-char project-pos)
-            (org-cut-subtree)
-            ;; The cut may have moved the folder, so find it again.
-            (let ((folder-pos (ticktick--find-folder-heading group-id)))
-              (goto-char folder-pos)
-              (org-end-of-subtree t t)
-              (unless (bolp) (insert "\n"))
-              (org-paste-subtree 2)))
-          (ticktick--find-project-heading project-id))))))
+      (save-excursion
+        (goto-char project-pos)
+        (org-cut-subtree)
+        (let ((parent-pos (funcall find-parent)))
+          (if parent-pos
+              (progn (goto-char parent-pos) (org-end-of-subtree t t))
+            (goto-char (point-max)))
+          (unless (bolp) (insert "\n"))
+          (org-paste-subtree level)))
+      (ticktick--find-project-heading project-id))))
 
-(defun ticktick--create-project-heading (project-title project-id &optional level)
+(defun ticktick--place-project (project project-pos)
+  "Return the position of PROJECT's heading, put where it belongs.
+Creates the heading when PROJECT-POS is nil, and moves it when it is in
+the wrong place -- which is how a list follows being archived, being
+un-archived, or being moved between folders in TickTick."
+  (let* ((dest (ticktick--project-destination project))
+         (find-parent (car dest))
+         (level (cdr dest))
+         (project-id (plist-get project :id))
+         (parent-pos (funcall find-parent)))
+    (cond
+     ((null project-pos)
+      (ticktick--create-project-heading
+       (plist-get project :name) project-id level parent-pos))
+     ((ticktick--project-placed-p project-pos parent-pos level)
+      project-pos)
+     (t
+      (or (ticktick--move-project project-id find-parent level)
+          project-pos)))))
+
+(defun ticktick--create-project-heading (project-title project-id
+                                                       &optional level parent-pos)
   "Insert a new Org heading for PROJECT-TITLE with PROJECT-ID.
-LEVEL defaults to 1; a list inside a folder sits one level deeper.
+LEVEL defaults to 1; a list inside a folder or under the archived
+heading sits one level deeper.  PARENT-POS is the heading to put it
+under, or nil for the end of the file.
 Return the buffer position at the start of the heading."
-  (goto-char (point-max))
+  (if parent-pos
+      (progn (goto-char parent-pos) (org-end-of-subtree t t))
+    (goto-char (point-max)))
   (unless (bolp) (insert "\n"))            ; ensure we start on a fresh line
   (let ((start (point)))                   ; this will be the heading's start
     (insert (format "%s %s\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: %s\n:END:\n"
@@ -1528,32 +1598,8 @@ reaches the org file."
                             (goto-char (point-min))
                             (when (re-search-forward project-heading-re nil t)
                               (match-beginning 0))))))
-    (let* ((group-id (plist-get project :groupId))
-           (folder (ticktick--project-folder-name project)))
-      (when folder
-        (ticktick--ensure-folder-heading group-id folder)
-        (when project-pos
-          (setq project-pos
-                (or (ticktick--place-project-under-folder project-id group-id)
-                    project-pos))))
-      (unless project-pos
-        (setq project-pos
-              (if folder
-                  (save-excursion
-                    (goto-char (ticktick--find-folder-heading group-id))
-                    (org-end-of-subtree t t)
-                    (unless (bolp) (insert "\n"))
-                    (let ((start (point)))
-                      (insert (format "** %s\n:PROPERTIES:\n:TICKTICK_PROJECT_ID: %s\n:END:\n"
-                                      project-title project-id))
-                      start))
-                (ticktick--create-project-heading project-title project-id)))))
+    (setq project-pos (ticktick--place-project project project-pos))
     (goto-char project-pos)
-    (when (eq ticktick-archived-project-behavior 'tag)
-      (save-excursion
-        (goto-char project-pos)
-        (org-toggle-tag ticktick--archived-tag
-                        (if (ticktick--project-archived-p project) 'on 'off))))
     (outline-show-subtree)
     (let ((tasks (ticktick--project-task-list project-id))
           ;; Tasks sit one level below their list, wherever that list is.

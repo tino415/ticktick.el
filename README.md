@@ -144,8 +144,11 @@ Task description content here.
 ;; What a heading nested under a task means: 'fold or 'subtask (default: 'fold)
 (setq ticktick-subheading-behavior 'subtask)
 
-;; Lists archived in TickTick: 'tag or 'skip (default: 'tag)
+;; Lists archived in TickTick: 'heading or 'skip (default: 'heading)
 (setq ticktick-archived-project-behavior 'skip)
+
+;; Title of the heading archived lists gather under (default: "Archived")
+(setq ticktick-archived-heading "Archived")
 
 ;; Nest lists under their TickTick folder (default: nil)
 (setq ticktick-group-projects-in-folders t)
@@ -335,16 +338,34 @@ where they are.
 
 ### Archived Lists
 
-A list archived in TickTick keeps syncing, with an `:archived:` tag on its
-project heading; un-archiving removes the tag again. To leave archived
-lists out of the file entirely:
+A list archived in TickTick keeps syncing, gathered under a top-level
+`Archived` heading along with its tasks:
+
+```org
+* Archived
+:PROPERTIES:
+:TICKTICK_ARCHIVED: t
+:END:
+** Old project
+:PROPERTIES:
+:TICKTICK_PROJECT_ID: prj789
+:END:
+*** TODO Something left over
+```
+
+Un-archiving in TickTick moves the list back out, tasks and all. Rename
+the heading if you like — it is found by its `TICKTICK_ARCHIVED` property,
+not its title, via `ticktick-archived-heading`.
+
+To leave archived lists out of the file entirely:
 
 ```elisp
 (setq ticktick-archived-project-behavior 'skip)
 ```
 
 Either way their tasks are still tracked internally, so archiving a list
-never looks like its tasks were deleted.
+never looks like its tasks were deleted. An archived list that also
+belongs to a folder goes under `Archived` rather than the folder.
 
 ### Subtasks
 

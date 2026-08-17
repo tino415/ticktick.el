@@ -980,16 +980,25 @@ DATA is the optional request body data."
                       (setq response-data (ticktick-request method endpoint data)))
                      (t (error "HTTP Error %s" status))))))
       :error (cl-function
-              (lambda (&key response error-thrown &allow-other-keys)
-                (let ((status (and response (request-response-status-code response))))
+              (lambda (&key response error-thrown symbol-status &allow-other-keys)
+                (let ((status (and response
+                                   (request-response-status-code response))))
                   (cond
-                   ((= status 401)
+                   ;; `status' is nil when the request never got a reply at
+                   ;; all, so it has to be tested before being compared.
+                   ((eql status 401)
                     (ticktick-refresh-token)
                     (setq response-data (ticktick-request method endpoint data)))
                    (t
-                    (message "Request failed: %s"
-                             (or (and response (request-response-data response))
-                                 error-thrown))
+                    ;; Say what actually went wrong.  This used to report
+                    ;; the response body in preference to the error, so a
+                    ;; failure printed a screenful of parsed tasks and threw
+                    ;; away the one thing worth knowing.
+                    (message "TickTick %s %s failed: %s (HTTP %s, %s)"
+                             method endpoint
+                             (or error-thrown "no error given")
+                             (or status "no response")
+                             (or symbol-status "no status"))
                     (setq response-data nil)))))))
     response-data))
 

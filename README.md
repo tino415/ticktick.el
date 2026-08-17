@@ -123,7 +123,7 @@ Task description content here.
 (setq ticktick-dir "/path/to/ticktick/data/")
 
 ;; Enable automatic syncing on focus changes (default: nil)
-(setq ticktick--autosync t)
+(setq ticktick-autosync t)
 
 ;; Enable automatic syncing every N minutes (default: nil)
 (setq ticktick-sync-interval 30)
@@ -136,7 +136,54 @@ Task description content here.
 
 ;; Org keyword for tasks marked "won't do" (default: "CANCELLED")
 (setq ticktick-wont-do-keyword "CANCELLED")
+
+;; Keep descriptions in a markdown source block (default: t)
+;; Only applies when ticktick-subheading-behavior is 'subtask; see Descriptions.
+(setq ticktick-content-as-src-block nil)
+
+;; What a heading nested under a task means: 'fold or 'subtask (default: 'fold)
+(setq ticktick-subheading-behavior 'subtask)
+
+;; Lists archived in TickTick: 'tag or 'skip (default: 'tag)
+(setq ticktick-archived-project-behavior 'skip)
+
+;; Nest lists under their TickTick folder (default: nil)
+(setq ticktick-group-projects-in-folders t)
+
+;; How deletions are handled: 'ask, 'archive, 'delete or 'sync-only
+;; (default: 'ask)
+(setq ticktick-delete-behavior 'archive)
+
+;; Where archived tasks go: 'separate-file or 'archive-heading
+;; (default: 'separate-file)
+(setq ticktick-archive-location 'archive-heading)
+
+;; Archive file, when archiving to a separate file
+;; (default: ~/.emacs.d/ticktick/ticktick-archive.org)
+(setq ticktick-archive-file "/path/to/ticktick-archive.org")
+
+;; Ask before each deletion; ignored when ticktick-delete-behavior is
+;; 'delete (default: t)
+(setq ticktick-confirm-deletions nil)
+
+;; Resolving a task edited on one side and deleted on the other:
+;; 'keep-newest, 'prefer-org, 'prefer-api or 'ask (default: 'keep-newest)
+(setq ticktick-deletion-conflict-policy 'prefer-org)
+
+;; Where the OAuth token is stored
+;; (default: ~/.emacs.d/ticktick/.ticktick-token)
+(setq ticktick-token-file "/path/to/.ticktick-token")
+
+;; Must match the redirect URI registered with TickTick
+;; (default: http://localhost:8080/ticktick-callback)
+(setq ticktick-redirect-uri "http://localhost:8080/ticktick-callback")
+
+;; OAuth scopes requested (default: "tasks:write tasks:read")
+(setq ticktick-auth-scopes "tasks:write tasks:read")
 ```
+
+Each of these has a section below explaining what it changes and what
+switching it does to an existing sync file.
 
 ### Completed Tasks
 
@@ -159,7 +206,7 @@ Enable automatic syncing with one of these methods:
 
 **Focus-based syncing** (syncs when switching buffers or losing focus):
 ```elisp
-(setq ticktick--autosync t)
+(setq ticktick-autosync t)
 ```
 
 **Timer-based syncing** (syncs every N minutes):

@@ -658,6 +658,16 @@ stay if nothing moved it."
       (should-not (org-entry-get nil "ARCHIVE_TIME"))
       (should-not (org-entry-get nil "ARCHIVE_OLPATH"))))))
 
+(ert-deftest ticktick-test-a-stale-behavior-value-still-gathers ()
+  "A value left over from an earlier version must not silently do nothing.
+Only `skip' turns gathering off; anything else gathers."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (let ((ticktick-archived-project-behavior 'tag))   ; no longer a real value
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org)))
+   (should (equal (cdr (assoc "Archived" (ticktick-test--heading-levels))) 1))
+   (should (equal (cdr (assoc "🏗Ticktick.el" (ticktick-test--heading-levels))) 2))))
+
 (ert-deftest ticktick-test-archiving-does-not-duplicate-the-list ()
   "Moving the heading must not leave a second one behind."
   (ticktick-test--with-env

@@ -395,6 +395,13 @@ TICKTICK_ARCHIVED property, not by its title."
   :type 'string
   :group 'ticktick)
 
+(defun ticktick--gather-archived-p ()
+  "Return non-nil if archived lists should be gathered under a heading.
+Anything other than `skip' counts, so a setting left over from an
+earlier version -- or a typo -- gathers them rather than quietly doing
+nothing at all."
+  (not (eq ticktick-archived-project-behavior 'skip)))
+
 (defun ticktick--project-archived-p (project)
   "Return non-nil if PROJECT has been archived in TickTick.
 Only a real boolean true counts: JSON false parses to `:json-false',
@@ -1483,7 +1490,7 @@ TickTick should read as put away in Org too."
         (folder (ticktick--project-folder-name project)))
     (cond
      ((and (ticktick--project-archived-p project)
-           (eq ticktick-archived-project-behavior 'heading))
+           (ticktick--gather-archived-p))
       (cons #'ticktick--ensure-archived-heading 2))
      (folder
       (cons (lambda () (ticktick--ensure-folder-heading group-id folder)) 2))
@@ -1543,7 +1550,7 @@ un-archived, or being moved between folders in TickTick."
 PROJECT-POS is where it currently is, or nil.  Returns its position."
   (let ((pos (ticktick--place-project project project-pos))
         (archived (and (ticktick--project-archived-p project)
-                       (eq ticktick-archived-project-behavior 'heading))))
+                       (ticktick--gather-archived-p))))
     (if archived
         (ticktick--record-archive-metadata pos project)
       (ticktick--clear-archive-metadata pos))

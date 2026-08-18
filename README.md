@@ -342,20 +342,33 @@ A list archived in TickTick keeps syncing, gathered under a top-level
 `Archived` heading along with its tasks:
 
 ```org
-* Archived
+* Archived                                                        :ARCHIVE:
 :PROPERTIES:
 :TICKTICK_ARCHIVED: t
 :END:
 ** Old project
 :PROPERTIES:
 :TICKTICK_PROJECT_ID: prj789
+:ARCHIVE_TIME: [2026-08-17 Mon 21:04]
+:ARCHIVE_OLPATH: Work
 :END:
 *** TODO Something left over
 ```
 
-Un-archiving in TickTick moves the list back out, tasks and all. Rename
-the heading if you like — it is found by its `TICKTICK_ARCHIVED` property,
-not its title, via `ticktick-archived-heading`.
+It carries Org's own `ARCHIVE` tag, so the subtree folds away and stays
+out of the agenda like any archived tree, and it is kept at the end of the
+file as lists are added above it.
+
+Each archived list records what TickTick can tell us:
+
+- `ARCHIVE_OLPATH` — the folder the list belongs to, when it has one.
+- `ARCHIVE_TIME` — when a sync **first saw** the list archived. TickTick's
+  API reports no timestamp for projects, so this is not when you archived
+  it; it is set once and then left alone.
+
+Un-archiving in TickTick moves the list back out, tasks and all, and drops
+both properties. Rename the heading if you like — it is found by its
+`TICKTICK_ARCHIVED` property, not its title, via `ticktick-archived-heading`.
 
 To leave archived lists out of the file entirely:
 

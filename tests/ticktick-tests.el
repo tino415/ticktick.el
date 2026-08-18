@@ -584,6 +584,80 @@ Its parent may be completed, deleted, or past the filter's limit."
      ;; and its tasks came back up with it
      (should (equal (cdr (assoc "Test task active" levels)) 2)))))
 
+(ert-deftest ticktick-test-archived-heading-carries-the-org-archive-tag ()
+  "Org's own tag, so the subtree folds and stays out of the agenda."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-archived-heading))
+      (should (member org-archive-tag (org-get-tags nil t)))))))
+
+(ert-deftest ticktick-test-archive-tag-does-not-hide-tasks ()
+  "Tasks under an archived list must still be found, or they duplicate."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (let ((n 0))
+     (dolist (h (ticktick-test--heading-levels))
+       (when (equal (car h) "Test task active") (setq n (1+ n))))
+     (should (= n 1)))))
+
+(ert-deftest ticktick-test-archived-heading-is-last ()
+  "Lists get added as they sync, so the archive has to be put back last.
+The file starts with the archive at the top, which is where it would
+stay if nothing moved it."
+  (ticktick-test--with-env
+   (with-temp-file ticktick-sync-file
+     (insert "* Archived\n:PROPERTIES:\n:TICKTICK_ARCHIVED: t\n:END:\n"))
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (let ((tops (cl-remove-if-not (lambda (h) (= (cdr h) 1))
+                                 (ticktick-test--heading-levels))))
+     (should (> (length tops) 1))
+     (should (equal (car (car (last tops))) "Archived")))))
+
+(ert-deftest ticktick-test-archived-list-records-what-is-known ()
+  "The folder it came from, and when the sync first saw it archived."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-project-heading ticktick-test-project-id))
+      ;; the fixture project belongs to the "Other" folder
+      (should (equal (org-entry-get nil "ARCHIVE_OLPATH") "Other"))
+      (should (org-entry-get nil "ARCHIVE_TIME"))))))
+
+(ert-deftest ticktick-test-archive-time-is-not-rewritten ()
+  "It records first sight, so a later sync must leave it alone."
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (let ((first (with-current-buffer (find-file-noselect ticktick-sync-file)
+                  (org-with-wide-buffer
+                   (goto-char (ticktick--find-project-heading
+                               ticktick-test-project-id))
+                   (org-entry-get nil "ARCHIVE_TIME")))))
+     (should first)
+     (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+     (with-current-buffer (find-file-noselect ticktick-sync-file)
+       (org-with-wide-buffer
+        (goto-char (ticktick--find-project-heading ticktick-test-project-id))
+        (should (equal (org-entry-get nil "ARCHIVE_TIME") first)))))))
+
+(ert-deftest ticktick-test-unarchiving-clears-the-archive-metadata ()
+  (ticktick-test--with-env
+   (ticktick-test--org-file nil)
+   (ticktick-test--with-archived-project (ticktick-fetch-to-org))
+   (ticktick-fetch-to-org)
+   (with-current-buffer (find-file-noselect ticktick-sync-file)
+     (org-with-wide-buffer
+      (goto-char (ticktick--find-project-heading ticktick-test-project-id))
+      (should-not (org-entry-get nil "ARCHIVE_TIME"))
+      (should-not (org-entry-get nil "ARCHIVE_OLPATH"))))))
+
 (ert-deftest ticktick-test-archiving-does-not-duplicate-the-list ()
   "Moving the heading must not leave a second one behind."
   (ticktick-test--with-env

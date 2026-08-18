@@ -1352,15 +1352,21 @@ skipped silently."
                       (when (and id name) (cons id name))))
                   groups))))
 
+(defun ticktick--folder-name-of (project)
+  "Return the name of the folder PROJECT belongs to in TickTick, or nil.
+Independent of `ticktick-group-projects-in-folders': an archived list
+records the folder it came from whether or not folders are mirrored."
+  (let ((group-id (plist-get project :groupId)))
+    (and group-id
+         (cdr (assoc group-id ticktick--project-groups)))))
+
 (defun ticktick--project-folder-name (project)
-  "Return the name of the folder PROJECT sits in, or nil.
+  "Return the folder heading PROJECT should sit under, or nil.
 A folder whose name could not be looked up is treated as no folder:
 showing a raw group id as a heading would be worse than leaving the
 list where it was."
   (when ticktick-group-projects-in-folders
-    (let ((group-id (plist-get project :groupId)))
-      (and group-id
-           (cdr (assoc group-id ticktick--project-groups))))))
+    (ticktick--folder-name-of project)))
 
 (defun ticktick--find-folder-heading (group-id)
   "Return the position of the folder heading carrying GROUP-ID, or nil."
@@ -1406,15 +1412,64 @@ same project."
       (point))))
 
 (defun ticktick--ensure-archived-heading ()
-  "Return the position of the archived-lists heading, creating it."
-  (or (ticktick--find-archived-heading)
-      (save-excursion
-        (goto-char (point-max))
-        (unless (bolp) (insert "\n"))
-        (let ((start (point)))
-          (insert (format "* %s\n:PROPERTIES:\n:TICKTICK_ARCHIVED: t\n:END:\n"
-                          ticktick-archived-heading))
-          start))))
+  "Return the position of the archived-lists heading, creating it.
+The heading carries Org's own archive tag, so the whole thing folds away
+and stays out of the agenda the way any archived subtree does."
+  (let ((pos (or (ticktick--find-archived-heading)
+                 (save-excursion
+                   (goto-char (point-max))
+                   (unless (bolp) (insert "\n"))
+                   (let ((start (point)))
+                     (insert (format "* %s\n:PROPERTIES:\n:TICKTICK_ARCHIVED: t\n:END:\n"
+                                     ticktick-archived-heading))
+                     start)))))
+    (save-excursion
+      (goto-char pos)
+      (org-toggle-tag org-archive-tag 'on))
+    ;; Tagging rewrites the heading line, which can shift it.
+    (ticktick--find-archived-heading)))
+
+(defun ticktick--archived-heading-to-end ()
+  "Move the archived-lists heading below everything else.
+Lists are added as they are synced, so without this the archive would
+end up wherever it happened to be created."
+  (let ((pos (ticktick--find-archived-heading)))
+    (when pos
+      (let ((after-subtree (save-excursion
+                             (goto-char pos)
+                             (org-end-of-subtree t t)
+                             (point))))
+        ;; Only move it if some other heading follows.
+        (when (save-excursion
+                (goto-char after-subtree)
+                (re-search-forward "^\\*+ " nil t))
+          (save-excursion
+            (goto-char pos)
+            (org-cut-subtree)
+            (goto-char (point-max))
+            (unless (bolp) (insert "\n"))
+            (org-paste-subtree 1)))))))
+
+(defun ticktick--record-archive-metadata (project-pos project)
+  "Note on PROJECT-POS what is known about PROJECT being archived.
+ARCHIVE_TIME is when this package first saw the list archived, not when
+it was archived in TickTick -- the API reports no timestamp for that.
+ARCHIVE_OLPATH is the folder it belongs to, when it has one."
+  (save-excursion
+    (goto-char project-pos)
+    (unless (org-entry-get nil "ARCHIVE_TIME")
+      (org-set-property "ARCHIVE_TIME"
+                        (format-time-string (org-time-stamp-format t t))))
+    (let ((folder (ticktick--folder-name-of project)))
+      (when folder
+        (org-set-property "ARCHIVE_OLPATH" folder)))))
+
+(defun ticktick--clear-archive-metadata (project-pos)
+  "Remove archive bookkeeping from PROJECT-POS, which is no longer archived."
+  (save-excursion
+    (goto-char project-pos)
+    (org-entry-delete nil "ARCHIVE_TIME")
+    (org-entry-delete nil "ARCHIVE_OLPATH")))
 
 (defun ticktick--project-destination (project)
   "Return where PROJECT's heading belongs, as (FIND-PARENT . LEVEL).
@@ -1482,6 +1537,17 @@ un-archived, or being moved between folders in TickTick."
      (t
       (or (ticktick--move-project project-id find-parent level)
           project-pos)))))
+
+(defun ticktick--place-project-and-mark (project project-pos)
+  "Put PROJECT's heading where it belongs and record its archive state.
+PROJECT-POS is where it currently is, or nil.  Returns its position."
+  (let ((pos (ticktick--place-project project project-pos))
+        (archived (and (ticktick--project-archived-p project)
+                       (eq ticktick-archived-project-behavior 'heading))))
+    (if archived
+        (ticktick--record-archive-metadata pos project)
+      (ticktick--clear-archive-metadata pos))
+    pos))
 
 (defun ticktick--create-project-heading (project-title project-id
                                                        &optional level parent-pos)
@@ -1598,7 +1664,7 @@ reaches the org file."
                             (goto-char (point-min))
                             (when (re-search-forward project-heading-re nil t)
                               (match-beginning 0))))))
-    (setq project-pos (ticktick--place-project project project-pos))
+    (setq project-pos (ticktick--place-project-and-mark project project-pos))
     (goto-char project-pos)
     (outline-show-subtree)
     (let ((tasks (ticktick--project-task-list project-id))
@@ -1702,9 +1768,9 @@ Also detects and handles tasks deleted from TickTick since last sync."
   (let* ((inbox-project `(:id "inbox" :name "Inbox"))
          (projects (ticktick-request "GET" "/open/v1/project"))
          (all-projects (cons inbox-project projects))
-         (ticktick--project-groups
-          (when ticktick-group-projects-in-folders
-            (ticktick--fetch-project-groups))))
+         ;; Fetched whichever way folders are configured: an archived list
+         ;; records the folder it came from regardless.
+         (ticktick--project-groups (ticktick--fetch-project-groups)))
 
     ;; Collect current API task IDs
     (let ((current-api-ids (ticktick--collect-api-task-ids all-projects))
@@ -1743,6 +1809,8 @@ Also detects and handles tasks deleted from TickTick since last sync."
            (unless (and (eq ticktick-archived-project-behavior 'skip)
                         (ticktick--project-archived-p project))
              (ticktick--sync-project project)))
+         ;; After everything else has been placed, so it stays at the end.
+         (ticktick--archived-heading-to-end)
          (save-buffer)))
 
       ;; Update state with current API task IDs
